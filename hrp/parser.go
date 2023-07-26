@@ -46,9 +46,11 @@ func buildURL(baseURL, stepURL string, queryParams url.Values) (fullUrl *url.URL
 		}
 
 		// ensure path suffix '/' exists
-		if uStep.RawQuery == "" {
-			uStep.Path = strings.TrimRight(uStep.Path, "/") + "/"
-		}
+		/*
+			if uStep.RawQuery == "" {
+				uStep.Path = strings.TrimRight(uStep.Path, "/") + "/"
+			}
+		*/
 
 		fullUrl = uStep
 	}()
@@ -249,8 +251,9 @@ func (p *Parser) ParseString(raw string, variablesMapping map[string]interface{}
 			}
 			varValue, ok := variablesMapping[varName]
 			if !ok {
-				return raw, errors.Wrap(code.VariableNotFound,
-					fmt.Sprintf("variable %s not found", varName))
+				// 变量找不到，默认返回空字符串
+				return "", nil
+				//return raw, errors.Wrap(code.VariableNotFound, fmt.Sprintf("variable %s not found", varName))
 			}
 
 			if fmt.Sprintf("${%s}", varName) == raw || fmt.Sprintf("$%s", varName) == raw {
