@@ -20,8 +20,8 @@ teststeps:
     request:
       method: %s
       url: %s
-    %s:
-      %s
+      %s:
+        %s
     validate:
       - eq: ["status_code", 200]
       - eq: ["body.type", success]
@@ -90,7 +90,7 @@ var convertSwaggerCmd = &cobra.Command{
 									for k, _ := range properties {
 										pList = append(pList, fmt.Sprintf("%s: \"\"", k))
 									}
-									pName = strings.Join(pList, "\n      ")
+									pName = strings.Join(pList, "\n        ")
 								}
 							}
 							ps = append(ps, pName)
@@ -99,7 +99,7 @@ var convertSwaggerCmd = &cobra.Command{
 						}
 					}
 				}
-				yamlContent := fmt.Sprintf(yamlTemplate, urlPath, urlPath, strings.ToUpper(method), urlPath, reqParamKey[method], strings.Join(ps, "\n      "))
+				yamlContent := fmt.Sprintf(yamlTemplate, urlPath, urlPath, strings.ToUpper(method), urlPath, reqParamKey[method], strings.Join(ps, "\n        "))
 				if path == "" {
 					fmt.Println(yamlContent)
 					continue
