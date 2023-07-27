@@ -67,6 +67,15 @@ func (s *StepTestCaseWithOptionalArgs) Run(r *SessionRunner) (stepResult *StepRe
 	}()
 
 	stepTestCase := s.step.TestCase.(*TestCase)
+	if len(s.step.Validators) > 0 {
+		for _, testStep := range stepTestCase.TestSteps {
+			if len(testStep.Struct().Validators) > 0 {
+				testStep.Struct().Validators = append(testStep.Struct().Validators, s.step.Validators...)
+			} else {
+				testStep.Struct().Validators = s.step.Validators
+			}
+		}
+	}
 
 	// copy testcase to avoid data racing
 	copiedTestCase := &TestCase{}
