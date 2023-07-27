@@ -15,11 +15,6 @@ import (
 
 const yamlTemplate = `config:
   name: %s api test
-  headers:
-    Hrp-Test: ${GetRandomString()}
-    content-type: application/json;charset=UTF-8
-    authorization: Bearer ${authToken}
-    tntid: ${tntId}
 teststeps:
   - name: "%s api test"
     request:
@@ -48,7 +43,10 @@ var convertSwaggerCmd = &cobra.Command{
 		setLogLevel(logLevel)
 	},
 	RunE: func(cmd *cobra.Command, args []string) error {
-		path := args[1]
+		path := ""
+		if len(args) > 1 {
+			path = args[1]
+		}
 		u, err := url.Parse(args[0])
 		if err != nil {
 			return err
@@ -67,37 +65,38 @@ var convertSwaggerCmd = &cobra.Command{
 			for method, o := range obj.(map[string]interface{}) {
 				z := o.(map[string]interface{})
 				params, ok := z["parameters"].([]interface{})
-				if !ok {
-					continue
-				}
 				var ps []string
-				for _, param := range params {
-					p, ok := param.(map[string]interface{})
-					if !ok {
-						continue
-					}
-					pName, ok := p["name"].(string)
-					if !ok {
-						continue
-					}
-					if pName == "body" {
-						schema := p["schema"].(map[string]interface{})
-						sKey := schema["$ref"].(string)
-						dKey := strings.ReplaceAll(sKey, "#/definitions/", "")
-						definition, ok := definitions[dKey].(map[string]interface{})
-						if ok {
-							properties, ok := definition["properties"].(map[string]interface{})
-							if ok {
-								var pList []string
-								for k, _ := range properties {
-									pList = append(pList, fmt.Sprintf("%s: \"\"", k))
-								}
-								pName = strings.Join(pList, "\n      ")
-							}
+				if ok {
+					for _, param := range params {
+						p, ok := param.(map[string]interface{})
+						if !ok {
+							fmt.Println(urlPath)
+							continue
 						}
-						ps = append(ps, pName)
-					} else {
-						ps = append(ps, fmt.Sprintf("%s: \"\"", pName))
+						pName, ok := p["name"].(string)
+						if !ok {
+							fmt.Println(urlPath)
+							continue
+						}
+						if pName == "body" {
+							schema := p["schema"].(map[string]interface{})
+							sKey := schema["$ref"].(string)
+							dKey := strings.ReplaceAll(sKey, "#/definitions/", "")
+							definition, ok := definitions[dKey].(map[string]interface{})
+							if ok {
+								properties, ok := definition["properties"].(map[string]interface{})
+								if ok {
+									var pList []string
+									for k, _ := range properties {
+										pList = append(pList, fmt.Sprintf("%s: \"\"", k))
+									}
+									pName = strings.Join(pList, "\n      ")
+								}
+							}
+							ps = append(ps, pName)
+						} else {
+							ps = append(ps, fmt.Sprintf("%s: \"\"", pName))
+						}
 					}
 				}
 				yamlContent := fmt.Sprintf(yamlTemplate, urlPath, urlPath, strings.ToUpper(method), urlPath, reqParamKey[method], strings.Join(ps, "\n      "))
