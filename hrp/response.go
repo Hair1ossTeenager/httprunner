@@ -240,6 +240,17 @@ func (v *responseObject) searchJmespath(expr string) interface{} {
 		log.Error().Str("expr", expr).Err(err).Msg("search jmespath failed")
 		return expr // jmespath not found, return the expression
 	}
+	// process response body has $, just for my case
+	if vals, ok := checkValue.(map[string]interface{}); ok {
+		for k, _ := range vals {
+			if val, ok := vals[k].(string); ok {
+				if strings.Contains(val, "$") {
+					vals[k] = strings.ReplaceAll(val, "$", "$$")
+				}
+			}
+		}
+		return vals
+	}
 	if number, ok := checkValue.(builtinJSON.Number); ok {
 		checkNumber, err := parseJSONNumber(number)
 		if err != nil {
