@@ -97,7 +97,10 @@ var convertSwaggerCmd = &cobra.Command{
 								sKey = items["$ref"].(string)
 								isArray = true
 							} else {
-								sKey = schema["$ref"].(string)
+								sKey, ok = schema["$ref"].(string)
+								if !ok {
+									continue
+								}
 							}
 							dKey := strings.ReplaceAll(sKey, "#/definitions/", "")
 							definition, ok := definitions[dKey].(map[string]interface{})
@@ -119,8 +122,10 @@ var convertSwaggerCmd = &cobra.Command{
 							bodies = append(bodies, pName)
 						} else if in == "formData" {
 							formData = append(formData, fmt.Sprintf("%s: \"\"", pName))
-						} else {
+						} else if in == "query" {
 							queries = append(queries, fmt.Sprintf("%s: \"\"", pName))
+						} else {
+							continue
 						}
 					}
 				}
