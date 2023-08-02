@@ -20,19 +20,21 @@ teststeps:
     request:
       method: %s
       url: %s
-      %s:
-        %s
+      %s
     validate:
       - eq: ["status_code", 200]
       - eq: ["body.type", success]
 `
 
-var reqParamKey = map[string]string{
-	"get":    "params",
-	"put":    "body",
-	"post":   "body",
-	"delete": "params",
-}
+const paramTemplate = `%s:
+        %s
+`
+
+const (
+	arraySep   = "\n          "
+	defaultSep = "\n        "
+	paramSep   = "\n      "
+)
 
 var convertSwaggerCmd = &cobra.Command{
 	Use:          "convertSwagger $url $path",
@@ -65,7 +67,9 @@ var convertSwaggerCmd = &cobra.Command{
 			for method, o := range obj.(map[string]interface{}) {
 				z := o.(map[string]interface{})
 				params, ok := z["parameters"].([]interface{})
-				var ps []string
+				var queries []string
+				var bodies []string
+				var formData []string
 				if ok {
 					for _, param := range params {
 						p, ok := param.(map[string]interface{})
@@ -73,14 +77,28 @@ var convertSwaggerCmd = &cobra.Command{
 							fmt.Println(urlPath)
 							continue
 						}
+						in := p["in"].(string)
 						pName, ok := p["name"].(string)
 						if !ok {
 							fmt.Println(urlPath)
 							continue
 						}
-						if pName == "body" {
-							schema := p["schema"].(map[string]interface{})
-							sKey := schema["$ref"].(string)
+
+						if in == "body" {
+							schema, ok := p["schema"].(map[string]interface{})
+							if !ok {
+								fmt.Println(urlPath)
+								continue
+							}
+							sKey := ""
+							isArray := false
+							if _, ok := schema["type"]; ok {
+								items := schema["items"].(map[string]interface{})
+								sKey = items["$ref"].(string)
+								isArray = true
+							} else {
+								sKey = schema["$ref"].(string)
+							}
 							dKey := strings.ReplaceAll(sKey, "#/definitions/", "")
 							definition, ok := definitions[dKey].(map[string]interface{})
 							if ok {
@@ -90,16 +108,44 @@ var convertSwaggerCmd = &cobra.Command{
 									for k, _ := range properties {
 										pList = append(pList, fmt.Sprintf("%s: \"\"", k))
 									}
-									pName = strings.Join(pList, "\n        ")
+									sep := defaultSep
+									if isArray {
+										pList[0] = fmt.Sprintf("- %s", pList[0])
+										sep = arraySep
+									}
+									pName = strings.Join(pList, sep)
 								}
 							}
-							ps = append(ps, pName)
+							bodies = append(bodies, pName)
+						} else if in == "formData" {
+							formData = append(formData, fmt.Sprintf("%s: \"\"", pName))
 						} else {
-							ps = append(ps, fmt.Sprintf("%s: \"\"", pName))
+							queries = append(queries, fmt.Sprintf("%s: \"\"", pName))
 						}
 					}
 				}
-				yamlContent := fmt.Sprintf(yamlTemplate, urlPath, urlPath, strings.ToUpper(method), urlPath, reqParamKey[method], strings.Join(ps, "\n        "))
+				param := ""
+				queryParam := ""
+				bodyParam := ""
+				uploadParam := ""
+				if len(queries) > 0 {
+					queryParam = fmt.Sprintf(paramTemplate, "params", strings.Join(queries, defaultSep))
+				}
+				if len(bodies) > 0 {
+					bodyParam = fmt.Sprintf(paramTemplate, "body", strings.Join(bodies, defaultSep))
+				}
+				if len(formData) > 0 {
+					uploadParam = fmt.Sprintf(paramTemplate, "upload", strings.Join(formData, defaultSep))
+				}
+				for _, v := range []string{queryParam, bodyParam, uploadParam} {
+					if v != "" {
+						v = strings.Trim(v, defaultSep)
+						param = param + v + paramSep
+					}
+				}
+				param = strings.Trim(param, paramSep)
+				param = strings.Trim(param, " ")
+				yamlContent := fmt.Sprintf(yamlTemplate, urlPath, urlPath, strings.ToUpper(method), urlPath, param)
 				if path == "" {
 					fmt.Println(yamlContent)
 					continue
