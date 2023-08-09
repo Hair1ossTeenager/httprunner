@@ -9,7 +9,10 @@ import (
 const (
 	Success     = 0
 	GeneralFail = 1
+	HasError    = 1000
 )
+
+var hasError = false
 
 // environment: [2, 10)
 var (
@@ -152,6 +155,10 @@ var errorsMap = map[error]int{
 	LoopActionNotFoundError:   85,
 }
 
+func TestCaseHasError() {
+	hasError = true
+}
+
 func IsErrorPredefined(err error) bool {
 	_, ok := errorsMap[errors.Cause(err)]
 	return ok
@@ -159,6 +166,9 @@ func IsErrorPredefined(err error) bool {
 
 func GetErrorCode(err error) (errCode int) {
 	if err == nil {
+		if hasError {
+			return HasError
+		}
 		return Success
 	}
 

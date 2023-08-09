@@ -594,6 +594,7 @@ func (r *SessionRunner) Start(givenVars map[string]interface{}) error {
 			}
 
 			// failed
+			code.TestCaseHasError()
 			log.Error().Err(err).Str("step", stepName).
 				Str("type", stepType).
 				Bool("success", false).
