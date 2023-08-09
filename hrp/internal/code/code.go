@@ -9,7 +9,7 @@ import (
 const (
 	Success     = 0
 	GeneralFail = 1
-	HasError    = 1000
+	HasError    = 125
 )
 
 var hasError = false
