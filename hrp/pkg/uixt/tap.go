@@ -12,7 +12,7 @@ func (dExt *DriverExt) TapAbsXY(x, y float64, options ...ActionOption) error {
 func (dExt *DriverExt) TapXY(x, y float64, options ...ActionOption) error {
 	// tap on [x, y] percent of window size
 	if x > 1 || y > 1 {
-		return fmt.Errorf("x, y percentage should be < 1, got x=%v, y=%v", x, y)
+		return fmt.Errorf("x, y percentage should be <= 1, got x=%v, y=%v", x, y)
 	}
 
 	x = x * float64(dExt.windowSize.Width)
@@ -39,6 +39,20 @@ func (dExt *DriverExt) TapByCV(imagePath string, options ...ActionOption) error 
 	actionOptions := NewActionOptions(options...)
 
 	point, err := dExt.FindImageRectInUIKit(imagePath, options...)
+	if err != nil {
+		if actionOptions.IgnoreNotFoundError {
+			return nil
+		}
+		return err
+	}
+
+	return dExt.TapAbsXY(point.X, point.Y, options...)
+}
+
+func (dExt *DriverExt) TapByUIDetection(options ...ActionOption) error {
+	actionOptions := NewActionOptions(options...)
+
+	point, err := dExt.FindUIResult(options...)
 	if err != nil {
 		if actionOptions.IgnoreNotFoundError {
 			return nil

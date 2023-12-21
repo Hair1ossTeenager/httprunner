@@ -15,6 +15,7 @@ import (
 	"github.com/pkg/errors"
 	"github.com/rs/zerolog/log"
 
+	"github.com/httprunner/httprunner/v4/hrp/internal/builtin"
 	"github.com/httprunner/httprunner/v4/hrp/internal/code"
 	"github.com/httprunner/httprunner/v4/hrp/internal/json"
 	"github.com/httprunner/httprunner/v4/hrp/pkg/gidevice"
@@ -200,6 +201,12 @@ func (wd *wdaDriver) WindowSize() (size Size, err error) {
 		return Size{}, err
 	}
 	size = reply.Value.Size
+	scale, err := wd.Scale()
+	if err != nil {
+		return Size{}, errors.Wrap(err, "get window size scale failed")
+	}
+	size.Height = size.Height * int(scale)
+	size.Width = size.Width * int(scale)
 	return
 }
 
@@ -223,6 +230,9 @@ func (wd *wdaDriver) GetTimestamp() (timestamp int64, err error) {
 }
 
 func (wd *wdaDriver) Scale() (float64, error) {
+	if !builtin.IsZeroFloat64(wd.scale) {
+		return wd.scale, nil
+	}
 	screen, err := wd.Screen()
 	if err != nil {
 		return 0, errors.Wrap(code.MobileUIDriverError,
@@ -451,14 +461,25 @@ func (wd *wdaDriver) Tap(x, y int, options ...ActionOption) error {
 
 func (wd *wdaDriver) TapFloat(x, y float64, options ...ActionOption) (err error) {
 	// [[FBRoute POST:@"/wda/tap/:uuid"] respondWithTarget:self action:@selector(handleTap:)]
-	data := map[string]interface{}{
-		"x": wd.toScale(x),
-		"y": wd.toScale(y),
-	}
-	// new data options in post data for extra WDA configurations
-	newData := mergeDataWithOptions(data, options...)
+	actionOptions := NewActionOptions(options...)
 
-	_, err = wd.httpPOST(newData, "/session", wd.sessionId, "/wda/tap/0")
+	x = wd.toScale(x)
+	y = wd.toScale(y)
+	if len(actionOptions.Offset) == 2 {
+		x += float64(actionOptions.Offset[0])
+		y += float64(actionOptions.Offset[1])
+	}
+	x += actionOptions.getRandomOffset()
+	y += actionOptions.getRandomOffset()
+
+	data := map[string]interface{}{
+		"x": x,
+		"y": y,
+	}
+	// update data options in post data for extra WDA configurations
+	actionOptions.updateData(data)
+
+	_, err = wd.httpPOST(data, "/session", wd.sessionId, "/wda/tap/0")
 	return
 }
 
@@ -500,17 +521,34 @@ func (wd *wdaDriver) Drag(fromX, fromY, toX, toY int, options ...ActionOption) e
 
 func (wd *wdaDriver) DragFloat(fromX, fromY, toX, toY float64, options ...ActionOption) (err error) {
 	// [[FBRoute POST:@"/wda/dragfromtoforduration"] respondWithTarget:self action:@selector(handleDragCoordinate:)]
+	actionOptions := NewActionOptions(options...)
+
+	fromX = wd.toScale(fromX)
+	fromY = wd.toScale(fromY)
+	toX = wd.toScale(toX)
+	toY = wd.toScale(toY)
+	if len(actionOptions.Offset) == 4 {
+		fromX += float64(actionOptions.Offset[0])
+		fromY += float64(actionOptions.Offset[1])
+		toX += float64(actionOptions.Offset[2])
+		toY += float64(actionOptions.Offset[3])
+	}
+	fromX += actionOptions.getRandomOffset()
+	fromY += actionOptions.getRandomOffset()
+	toX += actionOptions.getRandomOffset()
+	toY += actionOptions.getRandomOffset()
+
 	data := map[string]interface{}{
-		"fromX": wd.toScale(fromX),
-		"fromY": wd.toScale(fromY),
-		"toX":   wd.toScale(toX),
-		"toY":   wd.toScale(toY),
+		"fromX": fromX,
+		"fromY": fromY,
+		"toX":   toX,
+		"toY":   toY,
 	}
 
-	// new data options in post data for extra WDA configurations
-	newData := mergeDataWithOptions(data, options...)
+	// update data options in post data for extra WDA configurations
+	actionOptions.updateData(data)
 
-	_, err = wd.httpPOST(newData, "/session", wd.sessionId, "/wda/dragfromtoforduration")
+	_, err = wd.httpPOST(data, "/session", wd.sessionId, "/wda/dragfromtoforduration")
 	return
 }
 
@@ -547,12 +585,13 @@ func (wd *wdaDriver) GetPasteboard(contentType PasteboardType) (raw *bytes.Buffe
 
 func (wd *wdaDriver) SendKeys(text string, options ...ActionOption) (err error) {
 	// [[FBRoute POST:@"/wda/keys"] respondWithTarget:self action:@selector(handleKeys:)]
+	actionOptions := NewActionOptions(options...)
 	data := map[string]interface{}{"value": strings.Split(text, "")}
 
 	// new data options in post data for extra WDA configurations
-	newData := mergeDataWithOptions(data, options...)
+	actionOptions.updateData(data)
 
-	_, err = wd.httpPOST(newData, "/session", wd.sessionId, "/wda/keys")
+	_, err = wd.httpPOST(data, "/session", wd.sessionId, "/wda/keys")
 	return
 }
 
@@ -562,22 +601,38 @@ func (wd *wdaDriver) Input(text string, options ...ActionOption) (err error) {
 
 // PressBack simulates a short press on the BACK button.
 func (wd *wdaDriver) PressBack(options ...ActionOption) (err error) {
+	actionOptions := NewActionOptions(options...)
+
 	windowSize, err := wd.WindowSize()
 	if err != nil {
 		return
 	}
+	fromX := wd.toScale(float64(windowSize.Width) * 0)
+	fromY := wd.toScale(float64(windowSize.Height) * 0.5)
+	toX := wd.toScale(float64(windowSize.Width) * 0.6)
+	toY := wd.toScale(float64(windowSize.Height) * 0.5)
+	if len(actionOptions.Offset) == 4 {
+		fromX += float64(actionOptions.Offset[0])
+		fromY += float64(actionOptions.Offset[1])
+		toX += float64(actionOptions.Offset[2])
+		toY += float64(actionOptions.Offset[3])
+	}
+	fromX += actionOptions.getRandomOffset()
+	fromY += actionOptions.getRandomOffset()
+	toX += actionOptions.getRandomOffset()
+	toY += actionOptions.getRandomOffset()
 
 	data := map[string]interface{}{
-		"fromX": wd.toScale(float64(windowSize.Width) * 0),
-		"fromY": wd.toScale(float64(windowSize.Height) * 0.5),
-		"toX":   wd.toScale(float64(windowSize.Width) * 0.6),
-		"toY":   wd.toScale(float64(windowSize.Height) * 0.5),
+		"fromX": fromX,
+		"fromY": fromY,
+		"toX":   toX,
+		"toY":   toY,
 	}
 
-	// new data options in post data for extra WDA configurations
-	newData := mergeDataWithOptions(data, options...)
+	// update data options in post data for extra WDA configurations
+	actionOptions.updateData(data)
 
-	_, err = wd.httpPOST(newData, "/session", wd.sessionId, "/wda/dragfromtoforduration")
+	_, err = wd.httpPOST(data, "/session", wd.sessionId, "/wda/dragfromtoforduration")
 	return
 }
 

@@ -7,15 +7,13 @@ import (
 	"fmt"
 	"image"
 	"image/color"
-	"io/ioutil"
-	"log"
+	"io"
 	"math"
 	"os"
 
 	"github.com/pkg/errors"
+	"github.com/rs/zerolog/log"
 	"gocv.io/x/gocv"
-
-	"github.com/httprunner/httprunner/v4/hrp/internal/builtin"
 )
 
 const (
@@ -101,9 +99,11 @@ func (dExt *DriverExt) FindAllImageRect(search string) (rects []image.Rectangle,
 	if bufSearch, err = getBufFromDisk(search); err != nil {
 		return nil, err
 	}
-	if bufSource, _, err = dExt.takeScreenShot(builtin.GenNameWithTimestamp("%d_cv")); err != nil {
+	screenResult, err := dExt.GetScreenResult()
+	if err != nil {
 		return nil, err
 	}
+	bufSource = screenResult.bufSource
 
 	if rects, err = FindAllImageRectsFromRaw(bufSource, bufSearch, float32(dExt.threshold), TemplateMatchMode(dExt.matchMode)); err != nil {
 		return nil, err
@@ -133,7 +133,7 @@ func getBufFromDisk(name string) (*bytes.Buffer, error) {
 		return nil, err
 	}
 	var all []byte
-	if all, err = ioutil.ReadAll(f); err != nil {
+	if all, err = io.ReadAll(f); err != nil {
 		return nil, err
 	}
 	return bytes.NewBuffer(all), nil
@@ -361,7 +361,7 @@ func getMatsFromDisk(nameImage, nameTpl string, flags gocv.IMReadFlag) (matImage
 // 			return nil, e
 // 		}
 // 		var all []byte
-// 		if all, e = ioutil.ReadAll(f); e != nil {
+// 		if all, e = io.ReadAll(f); e != nil {
 // 			return nil, e
 // 		}
 // 		return bytes.NewBuffer(all), nil
@@ -409,14 +409,14 @@ func getMatchingLocation(matImage gocv.Mat, matTpl gocv.Mat, threshold float32, 
 	val, loc = getValLoc(minVal, maxVal, minLoc, maxLoc, matchMode)
 
 	if debug == DmEachMatch {
-		log.Println(fmt.Sprintf(dmOutputMsg, val, threshold))
+		log.Debug().Msg(fmt.Sprintf(dmOutputMsg, val, threshold))
 	}
 
 	if val >= threshold {
 		return loc, nil
 	} else {
 		if debug == DmNotMatch {
-			log.Println(fmt.Sprintf(dmOutputMsg, val, threshold))
+			log.Debug().Msg(fmt.Sprintf(dmOutputMsg, val, threshold))
 		}
 		return image.Point{}, errors.New("no such target search image")
 	}

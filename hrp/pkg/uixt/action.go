@@ -3,7 +3,6 @@ package uixt
 import (
 	"encoding/json"
 	"fmt"
-	"math"
 	"math/rand"
 	"time"
 
@@ -59,12 +58,23 @@ const (
 	ACTION_SwipeToTapText  ActionMethod = "swipe_to_tap_text"  // swipe up & down to find text and tap
 	ACTION_SwipeToTapTexts ActionMethod = "swipe_to_tap_texts" // swipe up & down to find text and tap
 	ACTION_VideoCrawler    ActionMethod = "video_crawler"
+	ACTION_ClosePopups     ActionMethod = "close_popups"
 )
 
 type MobileAction struct {
 	Method  ActionMethod   `json:"method,omitempty" yaml:"method,omitempty"`
 	Params  interface{}    `json:"params,omitempty" yaml:"params,omitempty"`
 	Options *ActionOptions `json:"options,omitempty" yaml:"options,omitempty"`
+	ActionOptions
+}
+
+func (ma MobileAction) GetOptions() []ActionOption {
+	var actionOptionList []ActionOption
+	if ma.Options != nil {
+		actionOptionList = append(actionOptionList, ma.Options.Options()...)
+	}
+	actionOptionList = append(actionOptionList, ma.ActionOptions.Options()...)
+	return actionOptionList
 }
 
 // (x1, y1) is the top left corner, (x2, y2) is the bottom right corner
@@ -96,12 +106,21 @@ type ActionOptions struct {
 	Scope    Scope    `json:"scope,omitempty" yaml:"scope,omitempty"`
 	AbsScope AbsScope `json:"abs_scope,omitempty" yaml:"abs_scope,omitempty"`
 
-	Regex  bool  `json:"regex,omitempty" yaml:"regex,omitempty"`   // use regex to match text
-	Offset []int `json:"offset,omitempty" yaml:"offset,omitempty"` // used to tap offset of point
-	Index  int   `json:"index,omitempty" yaml:"index,omitempty"`   // index of the target element
+	Regex             bool  `json:"regex,omitempty" yaml:"regex,omitempty"`                             // use regex to match text
+	Offset            []int `json:"offset,omitempty" yaml:"offset,omitempty"`                           // used to tap offset of point
+	OffsetRandomRange []int `json:"offset_random_range,omitempty" yaml:"offset_random_range,omitempty"` // set random range [min, max] for tap/swipe points
+	Index             int   `json:"index,omitempty" yaml:"index,omitempty"`                             // index of the target element
+	MatchOne          bool  `json:"match_one,omitempty" yaml:"match_one,omitempty"`                     // match one of the targets if existed
 
 	// set custiom options such as textview, id, description
 	Custom map[string]interface{} `json:"custom,omitempty" yaml:"custom,omitempty"`
+
+	// screenshot related
+	ScreenShotWithOCR         bool     `json:"screenshot_with_ocr,omitempty" yaml:"screenshot_with_ocr,omitempty"`
+	ScreenShotWithUpload      bool     `json:"screenshot_with_upload,omitempty" yaml:"screenshot_with_upload,omitempty"`
+	ScreenShotWithLiveType    bool     `json:"screenshot_with_live_type,omitempty" yaml:"screenshot_with_live_type,omitempty"`
+	ScreenShotWithUITypes     []string `json:"screenshot_with_ui_types,omitempty" yaml:"screenshot_with_ui_types,omitempty"`
+	ScreenShotWithClosePopups bool     `json:"screenshot_with_close_popups,omitempty" yaml:"screenshot_with_close_popups,omitempty"`
 }
 
 func (o *ActionOptions) Options() []ActionOption {
@@ -163,10 +182,26 @@ func (o *ActionOptions) Options() []ActionOption {
 			o.AbsScope[0], o.AbsScope[1], o.AbsScope[2], o.AbsScope[3]))
 	}
 	if len(o.Offset) == 2 {
-		options = append(options, WithOffset(o.Offset[0], o.Offset[1]))
+		// for tap [x,y] offset
+		options = append(options, WithTapOffset(o.Offset[0], o.Offset[1]))
+	} else if len(o.Offset) == 4 {
+		// for swipe [fromX, fromY, toX, toY] offset
+		options = append(options, WithSwipeOffset(
+			o.Offset[0], o.Offset[1], o.Offset[2], o.Offset[3]))
 	}
+	if len(o.OffsetRandomRange) == 2 {
+		options = append(options, WithOffsetRandomRange(
+			o.OffsetRandomRange[0], o.OffsetRandomRange[1]))
+	}
+
 	if o.Regex {
 		options = append(options, WithRegex(true))
+	}
+	if o.Index != 0 {
+		options = append(options, WithIndex(o.Index))
+	}
+	if o.MatchOne {
+		options = append(options, WithMatchOne(true))
 	}
 
 	// custom options
@@ -176,55 +211,79 @@ func (o *ActionOptions) Options() []ActionOption {
 		}
 	}
 
+	// screenshot options
+	if o.ScreenShotWithOCR {
+		options = append(options, WithScreenShotOCR(true))
+	}
+	if o.ScreenShotWithUpload {
+		options = append(options, WithScreenShotUpload(true))
+	}
+	if o.ScreenShotWithLiveType {
+		options = append(options, WithScreenShotLiveType(true))
+	}
+	if len(o.ScreenShotWithUITypes) > 0 {
+		options = append(options, WithScreenShotUITypes(o.ScreenShotWithUITypes...))
+	}
+
 	return options
 }
 
-func NewActionOptions(options ...ActionOption) *ActionOptions {
-	actionOptions := &ActionOptions{}
-	for _, option := range options {
-		option(actionOptions)
+func (o *ActionOptions) screenshotActions() []string {
+	actions := []string{}
+	if o.ScreenShotWithUpload {
+		actions = append(actions, "upload")
 	}
-	return actionOptions
+	if o.ScreenShotWithOCR {
+		actions = append(actions, "ocr")
+	}
+	if o.ScreenShotWithLiveType {
+		actions = append(actions, "liveType")
+	}
+	// UI detection
+	if len(o.ScreenShotWithUITypes) > 0 {
+		actions = append(actions, "ui")
+	}
+	if o.ScreenShotWithClosePopups {
+		actions = append(actions, "close")
+	}
+	return actions
 }
 
-func mergeDataWithOptions(data map[string]interface{}, options ...ActionOption) map[string]interface{} {
-	actionOptions := NewActionOptions(options...)
+func (o *ActionOptions) getRandomOffset() float64 {
+	if len(o.OffsetRandomRange) != 2 {
+		// invalid offset random range, should be [min, max]
+		return 0
+	}
 
-	if actionOptions.Identifier != "" {
+	minOffset := o.OffsetRandomRange[0]
+	maxOffset := o.OffsetRandomRange[1]
+	return float64(builtin.GetRandomNumber(minOffset, maxOffset)) + rand.Float64()
+}
+
+func (o *ActionOptions) updateData(data map[string]interface{}) {
+	if o.Identifier != "" {
 		data["log"] = map[string]interface{}{
 			"enable": true,
-			"data":   actionOptions.Identifier,
+			"data":   o.Identifier,
 		}
 	}
 
-	// handle point offset
-	if len(actionOptions.Offset) == 2 {
-		if x, ok := data["x"]; ok {
-			xf, _ := builtin.Interface2Float64(x)
-			data["x"] = xf + float64(actionOptions.Offset[0])
-		}
-		if y, ok := data["y"]; ok {
-			yf, _ := builtin.Interface2Float64(y)
-			data["y"] = yf + float64(actionOptions.Offset[1])
-		}
-	}
-
-	if actionOptions.Steps > 0 {
-		data["steps"] = actionOptions.Steps
+	if o.Steps > 0 {
+		data["steps"] = o.Steps
 	}
 	if _, ok := data["steps"]; !ok {
 		data["steps"] = 12 // default steps
 	}
 
-	if actionOptions.PressDuration > 0 {
-		data["duration"] = actionOptions.PressDuration
+	if o.PressDuration > 0 {
+		data["duration"] = o.PressDuration
 	}
 	if _, ok := data["duration"]; !ok {
 		data["duration"] = 0 // default duration
 	}
 
-	if actionOptions.Frequency > 0 {
-		data["frequency"] = actionOptions.Frequency
+	if o.Frequency > 0 {
+		data["frequency"] = o.Frequency
 	}
 	if _, ok := data["frequency"]; !ok {
 		data["frequency"] = 60 // default frequency
@@ -235,13 +294,19 @@ func mergeDataWithOptions(data map[string]interface{}, options ...ActionOption) 
 	}
 
 	// custom options
-	if actionOptions.Custom != nil {
-		for k, v := range actionOptions.Custom {
+	if o.Custom != nil {
+		for k, v := range o.Custom {
 			data[k] = v
 		}
 	}
+}
 
-	return data
+func NewActionOptions(options ...ActionOption) *ActionOptions {
+	actionOptions := &ActionOptions{}
+	for _, option := range options {
+		option(actionOptions)
+	}
+	return actionOptions
 }
 
 type ActionOption func(o *ActionOptions)
@@ -318,15 +383,38 @@ func WithAbsScope(x1, y1, x2, y2 int) ActionOption {
 	}
 }
 
+// Deprecated: use WithTapOffset instead
 func WithOffset(offsetX, offsetY int) ActionOption {
 	return func(o *ActionOptions) {
 		o.Offset = []int{offsetX, offsetY}
 	}
 }
 
+// tap [x, y] with offset [offsetX, offsetY]
+var WithTapOffset = WithOffset
+
+// swipe [fromX, fromY, toX, toY] with offset [offsetFromX, offsetFromY, offsetToX, offsetToY]
+func WithSwipeOffset(offsetFromX, offsetFromY, offsetToX, offsetToY int) ActionOption {
+	return func(o *ActionOptions) {
+		o.Offset = []int{offsetFromX, offsetFromY, offsetToX, offsetToY}
+	}
+}
+
+func WithOffsetRandomRange(min, max int) ActionOption {
+	return func(o *ActionOptions) {
+		o.OffsetRandomRange = []int{min, max}
+	}
+}
+
 func WithRegex(regex bool) ActionOption {
 	return func(o *ActionOptions) {
 		o.Regex = regex
+	}
+}
+
+func WithMatchOne(matchOne bool) ActionOption {
+	return func(o *ActionOptions) {
+		o.MatchOne = matchOne
 	}
 }
 
@@ -354,6 +442,36 @@ func WithIgnoreNotFoundError(ignoreError bool) ActionOption {
 	}
 }
 
+func WithScreenShotOCR(ocrOn bool) ActionOption {
+	return func(o *ActionOptions) {
+		o.ScreenShotWithOCR = ocrOn
+	}
+}
+
+func WithScreenShotUpload(uploadOn bool) ActionOption {
+	return func(o *ActionOptions) {
+		o.ScreenShotWithUpload = uploadOn
+	}
+}
+
+func WithScreenShotLiveType(liveTypeOn bool) ActionOption {
+	return func(o *ActionOptions) {
+		o.ScreenShotWithLiveType = liveTypeOn
+	}
+}
+
+func WithScreenShotUITypes(uiTypes ...string) ActionOption {
+	return func(o *ActionOptions) {
+		o.ScreenShotWithUITypes = uiTypes
+	}
+}
+
+func WithScreenShotClosePopups(closeOn bool) ActionOption {
+	return func(o *ActionOptions) {
+		o.ScreenShotWithClosePopups = closeOn
+	}
+}
+
 func (dExt *DriverExt) ParseActionOptions(options ...ActionOption) []ActionOption {
 	actionOptions := NewActionOptions(options...)
 
@@ -376,7 +494,7 @@ func (dExt *DriverExt) GenAbsScope(x1, y1, x2, y2 float64) AbsScope {
 	return AbsScope{absX1, absY1, absX2, absY2}
 }
 
-func (dExt *DriverExt) DoAction(action MobileAction) error {
+func (dExt *DriverExt) DoAction(action MobileAction) (err error) {
 	log.Debug().
 		Str("method", string(action.Method)).
 		Interface("params", action.Params).
@@ -384,11 +502,19 @@ func (dExt *DriverExt) DoAction(action MobileAction) error {
 	actionStartTime := time.Now()
 
 	defer func() {
-		log.Debug().
-			Str("method", string(action.Method)).
-			Interface("params", action.Params).
-			Float64("elapsed(s)", time.Since(actionStartTime).Seconds()).
-			Msg("uixt action end")
+		if err != nil {
+			log.Error().Err(err).
+				Str("method", string(action.Method)).
+				Interface("params", action.Params).
+				Int64("elapsed(ms)", time.Since(actionStartTime).Milliseconds()).
+				Msg("uixt action end")
+		} else {
+			log.Debug().
+				Str("method", string(action.Method)).
+				Interface("params", action.Params).
+				Int64("elapsed(ms)", time.Since(actionStartTime).Milliseconds()).
+				Msg("uixt action end")
+		}
 	}()
 
 	switch action.Method {
@@ -403,22 +529,24 @@ func (dExt *DriverExt) DoAction(action MobileAction) error {
 			ACTION_AppLaunch, action.Params)
 	case ACTION_SwipeToTapApp:
 		if appName, ok := action.Params.(string); ok {
-			return dExt.swipeToTapApp(appName, action.Options.Options()...)
+			return dExt.swipeToTapApp(appName, action.GetOptions()...)
 		}
 		return fmt.Errorf("invalid %s params, should be app name(string), got %v",
 			ACTION_SwipeToTapApp, action.Params)
 	case ACTION_SwipeToTapText:
 		if text, ok := action.Params.(string); ok {
-			return dExt.swipeToTapTexts([]string{text}, action.Options.Options()...)
+			return dExt.swipeToTapTexts([]string{text}, action.GetOptions()...)
 		}
 		return fmt.Errorf("invalid %s params, should be app text(string), got %v",
 			ACTION_SwipeToTapText, action.Params)
 	case ACTION_SwipeToTapTexts:
 		if texts, ok := action.Params.([]string); ok {
-			return dExt.swipeToTapTexts(texts, action.Options.Options()...)
+			return dExt.swipeToTapTexts(texts, action.GetOptions()...)
 		}
-		return fmt.Errorf("invalid %s params, should be app text([]string), got %v",
-			ACTION_SwipeToTapText, action.Params)
+		if texts, err := builtin.ConvertToStringSlice(action.Params); err == nil {
+			return dExt.swipeToTapTexts(texts, action.GetOptions()...)
+		}
+		return fmt.Errorf("invalid %s params: %v", ACTION_SwipeToTapTexts, action.Params)
 	case ACTION_AppTerminate:
 		if bundleId, ok := action.Params.(string); ok {
 			success, err := dExt.Driver.AppTerminate(bundleId)
@@ -441,7 +569,7 @@ func (dExt *DriverExt) DoAction(action MobileAction) error {
 			}
 			x, _ := location[0].(float64)
 			y, _ := location[1].(float64)
-			return dExt.TapXY(x, y, action.Options.Options()...)
+			return dExt.TapXY(x, y, action.GetOptions()...)
 		}
 		return fmt.Errorf("invalid %s params: %v", ACTION_TapXY, action.Params)
 	case ACTION_TapAbsXY:
@@ -452,22 +580,25 @@ func (dExt *DriverExt) DoAction(action MobileAction) error {
 			}
 			x, _ := location[0].(float64)
 			y, _ := location[1].(float64)
-			return dExt.TapAbsXY(x, y, action.Options.Options()...)
+			return dExt.TapAbsXY(x, y, action.GetOptions()...)
 		}
 		return fmt.Errorf("invalid %s params: %v", ACTION_TapAbsXY, action.Params)
 	case ACTION_Tap:
 		if param, ok := action.Params.(string); ok {
-			return dExt.Tap(param, action.Options.Options()...)
+			return dExt.Tap(param, action.GetOptions()...)
 		}
 		return fmt.Errorf("invalid %s params: %v", ACTION_Tap, action.Params)
 	case ACTION_TapByOCR:
 		if ocrText, ok := action.Params.(string); ok {
-			return dExt.TapByOCR(ocrText, action.Options.Options()...)
+			return dExt.TapByOCR(ocrText, action.GetOptions()...)
 		}
 		return fmt.Errorf("invalid %s params: %v", ACTION_TapByOCR, action.Params)
 	case ACTION_TapByCV:
+		actionOptions := NewActionOptions(action.GetOptions()...)
 		if imagePath, ok := action.Params.(string); ok {
-			return dExt.TapByCV(imagePath, action.Options.Options()...)
+			return dExt.TapByCV(imagePath, action.GetOptions()...)
+		} else if len(actionOptions.ScreenShotWithUITypes) > 0 {
+			return dExt.TapByUIDetection(action.GetOptions()...)
 		}
 		return fmt.Errorf("invalid %s params: %v", ACTION_TapByCV, action.Params)
 	case ACTION_DoubleTapXY:
@@ -487,14 +618,14 @@ func (dExt *DriverExt) DoAction(action MobileAction) error {
 		}
 		return fmt.Errorf("invalid %s params: %v", ACTION_DoubleTap, action.Params)
 	case ACTION_Swipe:
-		swipeAction := dExt.prepareSwipeAction(action.Options.Options()...)
+		swipeAction := dExt.prepareSwipeAction(action.GetOptions()...)
 		return swipeAction(dExt)
 	case ACTION_Input:
 		// input text on current active element
 		// append \n to send text with enter
 		// send \b\b\b to delete 3 chars
 		param := fmt.Sprintf("%v", action.Params)
-		return dExt.Driver.Input(param, action.Options.Options()...)
+		return dExt.Driver.Input(param, action.GetOptions()...)
 	case ACTION_Back:
 		return dExt.Driver.PressBack()
 	case ACTION_Sleep:
@@ -512,13 +643,14 @@ func (dExt *DriverExt) DoAction(action MobileAction) error {
 		return fmt.Errorf("invalid sleep params: %v(%T)", action.Params, action.Params)
 	case ACTION_SleepRandom:
 		if params, ok := action.Params.([]interface{}); ok {
-			return sleepRandom(time.Now(), params)
+			sleepStrict(time.Now(), getSimulationDuration(params))
+			return nil
 		}
 		return fmt.Errorf("invalid sleep random params: %v(%T)", action.Params, action.Params)
 	case ACTION_ScreenShot:
 		// take screenshot
 		log.Info().Msg("take screenshot for current screen")
-		_, _, err := dExt.takeScreenShot(builtin.GenNameWithTimestamp("%d_screenshot"))
+		_, err := dExt.GetScreenResult(action.GetOptions()...)
 		return err
 	case ACTION_StartCamera:
 		return dExt.Driver.StartCamera()
@@ -535,32 +667,28 @@ func (dExt *DriverExt) DoAction(action MobileAction) error {
 			return errors.Wrapf(err, "invalid video crawler params: %v(%T)", action.Params, action.Params)
 		}
 		return dExt.VideoCrawler(configs)
+	case ACTION_ClosePopups:
+		return dExt.ClosePopups(action.GetOptions()...)
 	}
 	return nil
 }
 
 var errActionNotImplemented = errors.New("UI action not implemented")
 
-func convertToFloat64(val interface{}) (float64, error) {
-	switch v := val.(type) {
-	case float64:
-		return v, nil
-	case int:
-		return float64(v), nil
-	case int64:
-		return float64(v), nil
-	default:
-		return 0, fmt.Errorf("invalid type for conversion to float64: %T, value: %+v", val, val)
-	}
-}
-
-// sleepRandom sleeps random time with given params
-// startTime is used to correct sleep duration caused by process time
-func sleepRandom(startTime time.Time, params []interface{}) error {
+// getSimulationDuration returns simulation duration by given params (in seconds)
+func getSimulationDuration(params []interface{}) (milliseconds int64) {
 	if len(params) == 1 {
-		// constant sleep time
-		params = append(params, params[0], 1.0)
-	} else if len(params) == 2 {
+		// given constant duration time
+		seconds, err := builtin.ConvertToFloat64(params[0])
+		if err != nil {
+			log.Error().Err(err).Interface("params", params).Msg("invalid params")
+			return 0
+		}
+		return int64(seconds * 1000)
+	}
+
+	if len(params) == 2 {
+		// given [min, max], missing weight
 		// append default weight 1
 		params = append(params, 1.0)
 	}
@@ -570,17 +698,20 @@ func sleepRandom(startTime time.Time, params []interface{}) error {
 	}
 	totalProb := 0.0
 	for i := 0; i+3 <= len(params); i += 3 {
-		min, err := convertToFloat64(params[i])
+		min, err := builtin.ConvertToFloat64(params[i])
 		if err != nil {
-			return errors.Wrapf(err, "invalid minimum time: %v", params[i])
+			log.Error().Err(err).Interface("min", params[i]).Msg("invalid minimum time")
+			return 0
 		}
-		max, err := convertToFloat64(params[i+1])
+		max, err := builtin.ConvertToFloat64(params[i+1])
 		if err != nil {
-			return errors.Wrapf(err, "invalid maximum time: %v", params[i+1])
+			log.Error().Err(err).Interface("max", params[i+1]).Msg("invalid maximum time")
+			return 0
 		}
-		weight, err := convertToFloat64(params[i+2])
+		weight, err := builtin.ConvertToFloat64(params[i+2])
 		if err != nil {
-			return errors.Wrapf(err, "invalid weight value: %v", params[i+2])
+			log.Error().Err(err).Interface("weight", params[i+2]).Msg("invalid weight value")
+			return 0
 		}
 		totalProb += weight
 		sections = append(sections,
@@ -589,8 +720,8 @@ func sleepRandom(startTime time.Time, params []interface{}) error {
 	}
 
 	if totalProb == 0 {
-		log.Warn().Msg("total weight is 0, skip sleep")
-		return nil
+		log.Warn().Msg("total weight is 0, skip simulation")
+		return 0
 	}
 
 	r := rand.Float64()
@@ -598,22 +729,36 @@ func sleepRandom(startTime time.Time, params []interface{}) error {
 	for _, s := range sections {
 		accProb += s.weight / totalProb
 		if r < accProb {
-			elapsed := time.Since(startTime).Seconds()
-			randomSeconds := s.min + rand.Float64()*(s.max-s.min)
-			dur := randomSeconds - elapsed
-
-			// if elapsed time is greater than random seconds, skip sleep to reduce deviation caused by process time
-			if dur <= 0 {
-				log.Info().Float64("elapsed", elapsed).Float64("randomSeconds", randomSeconds).
-					Interface("strategy_params", params).Msg("elapsed duration >= random seconds, skip sleep")
-			} else {
-				log.Info().Float64("sleepDuration", dur).Float64("elapsed", elapsed).Float64("randomSeconds", randomSeconds).
-					Interface("strategy_params", params).Msg("sleep remaining random seconds")
-				time.Sleep(time.Duration(math.Ceil(dur*1000)) * time.Millisecond)
-			}
-
-			return nil
+			milliseconds := int64((s.min + rand.Float64()*(s.max-s.min)) * 1000)
+			log.Info().Int64("random(ms)", milliseconds).
+				Interface("strategy_params", params).Msg("get simulation duration")
+			return milliseconds
 		}
 	}
-	return nil
+
+	log.Warn().Interface("strategy_params", params).
+		Msg("get simulation duration failed, skip simulation")
+	return 0
+}
+
+// sleepStrict sleeps strict duration with given params
+// startTime is used to correct sleep duration caused by process time
+func sleepStrict(startTime time.Time, strictMilliseconds int64) {
+	elapsed := time.Since(startTime).Milliseconds()
+	dur := strictMilliseconds - elapsed
+
+	// if elapsed time is greater than given duration, skip sleep to reduce deviation caused by process time
+	if dur <= 0 {
+		log.Warn().
+			Int64("elapsed(ms)", elapsed).
+			Int64("strictSleep(ms)", strictMilliseconds).
+			Msg("elapsed >= simulation duration, skip sleep")
+		return
+	}
+
+	log.Info().Int64("sleepDuration(ms)", dur).
+		Int64("elapsed(ms)", elapsed).
+		Int64("strictSleep(ms)", strictMilliseconds).
+		Msg("sleep remaining duration time")
+	time.Sleep(time.Duration(dur) * time.Millisecond)
 }

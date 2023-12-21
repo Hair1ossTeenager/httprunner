@@ -102,7 +102,7 @@ func (s *StepMobile) Tap(params string, options ...uixt.ActionOption) *StepMobil
 	return &StepMobile{step: s.step}
 }
 
-// Tap taps on the target element by OCR recognition
+// TapByOCR taps on the target element by OCR recognition
 func (s *StepMobile) TapByOCR(ocrText string, options ...uixt.ActionOption) *StepMobile {
 	action := uixt.MobileAction{
 		Method:  uixt.ACTION_TapByOCR,
@@ -114,11 +114,22 @@ func (s *StepMobile) TapByOCR(ocrText string, options ...uixt.ActionOption) *Ste
 	return &StepMobile{step: s.step}
 }
 
-// Tap taps on the target element by CV recognition
+// TapByCV taps on the target element by CV recognition
 func (s *StepMobile) TapByCV(imagePath string, options ...uixt.ActionOption) *StepMobile {
 	action := uixt.MobileAction{
 		Method:  uixt.ACTION_TapByCV,
 		Params:  imagePath,
+		Options: uixt.NewActionOptions(options...),
+	}
+
+	s.mobileStep().Actions = append(s.mobileStep().Actions, action)
+	return &StepMobile{step: s.step}
+}
+
+// TapByUITypes taps on the target element specified by uiTypes, the higher the uiTypes, the higher the priority
+func (s *StepMobile) TapByUITypes(options ...uixt.ActionOption) *StepMobile {
+	action := uixt.MobileAction{
+		Method:  uixt.ACTION_TapByCV,
 		Options: uixt.NewActionOptions(options...),
 	}
 
@@ -289,11 +300,11 @@ func (s *StepMobile) VideoCrawler(params map[string]interface{}) *StepMobile {
 	return &StepMobile{step: s.step}
 }
 
-func (s *StepMobile) ScreenShot() *StepMobile {
+func (s *StepMobile) ScreenShot(options ...uixt.ActionOption) *StepMobile {
 	s.mobileStep().Actions = append(s.mobileStep().Actions, uixt.MobileAction{
 		Method:  uixt.ACTION_ScreenShot,
 		Params:  nil,
-		Options: nil,
+		Options: uixt.NewActionOptions(options...),
 	})
 	return &StepMobile{step: s.step}
 }
@@ -312,6 +323,15 @@ func (s *StepMobile) StopCamera() *StepMobile {
 		Method:  uixt.ACTION_StopCamera,
 		Params:  nil,
 		Options: nil,
+	})
+	return &StepMobile{step: s.step}
+}
+
+func (s *StepMobile) ClosePopups(options ...uixt.ActionOption) *StepMobile {
+	s.mobileStep().Actions = append(s.mobileStep().Actions, uixt.MobileAction{
+		Method:  uixt.ACTION_ClosePopups,
+		Params:  nil,
+		Options: uixt.NewActionOptions(options...),
 	})
 	return &StepMobile{step: s.step}
 }
@@ -513,7 +533,7 @@ func (s *StepMobileUIValidation) Run(r *SessionRunner) (*StepResult, error) {
 	return runStepMobileUI(r, s.step)
 }
 
-func (r *HRPRunner) initUIClient(uuid string, osType string) (client *uixt.DriverExt, err error) {
+func (r *CaseRunner) initUIClient(uuid string, osType string) (client *uixt.DriverExt, err error) {
 	// avoid duplicate init
 	if uuid == "" && len(r.uiClients) > 0 {
 		for _, v := range r.uiClients {
@@ -538,7 +558,7 @@ func (r *HRPRunner) initUIClient(uuid string, osType string) (client *uixt.Drive
 		return nil, errors.Wrapf(err, "init %s device failed", osType)
 	}
 
-	client, err = device.NewDriver(nil)
+	client, err = device.NewDriver(uixt.WithDriverPlugin(r.parser.plugin))
 	if err != nil {
 		return nil, err
 	}
@@ -585,7 +605,7 @@ func runStepMobileUI(s *SessionRunner, step *TStep) (stepResult *StepResult, err
 	}
 
 	// init wda/uia driver
-	uiDriver, err := s.caseRunner.hrpRunner.initUIClient(mobileStep.Serial, osType)
+	uiDriver, err := s.caseRunner.initUIClient(mobileStep.Serial, osType)
 	if err != nil {
 		return
 	}
@@ -603,13 +623,9 @@ func runStepMobileUI(s *SessionRunner, step *TStep) (stepResult *StepResult, err
 			}
 		}
 
-		// take screenshot and get screen texts by OCR
-		screenTexts, err2 := uiDriver.GetScreenTexts()
-		if err2 != nil {
-			log.Error().Err(err2).Str("step", step.Name).Msg("take screenshot failed on step finished")
-		} else if err3 := uiDriver.AutoPopupHandler(screenTexts); err3 != nil {
-			// automatic handling of pop-up windows on each step finished
-			log.Error().Err(err3).Msg("auto handle popup failed")
+		// automatic handling of pop-up windows on each step finished
+		if err2 := uiDriver.ClosePopups(); err2 != nil {
+			log.Error().Err(err2).Str("step", step.Name).Msg("auto handle popup failed")
 		}
 
 		// save attachments
@@ -660,7 +676,11 @@ func runStepMobileUI(s *SessionRunner, step *TStep) (stepResult *StepResult, err
 	}
 
 	// validate
-	validateResults, err := validateUI(uiDriver, step.Validators)
+	stepValidators, err := s.ParseStepValidators(step.Validators, stepVariables)
+	if err != nil {
+		return
+	}
+	validateResults, err := validateUI(uiDriver, stepValidators)
 	if err != nil {
 		if !code.IsErrorPredefined(err) {
 			err = errors.Wrap(code.MobileUIValidationError, err.Error())

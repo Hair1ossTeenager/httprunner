@@ -7,6 +7,7 @@ import (
 	"github.com/pkg/errors"
 	"github.com/rs/zerolog/log"
 
+	"github.com/httprunner/httprunner/v4/hrp/internal/builtin"
 	"github.com/httprunner/httprunner/v4/hrp/internal/code"
 )
 
@@ -71,6 +72,9 @@ func (dExt *DriverExt) LoopUntil(findAction, findCondition, foundAction Action, 
 	interval := actionOptions.Interval
 
 	for i := 0; i < maxRetryTimes; i++ {
+		// wait interval between each findAction
+		time.Sleep(time.Duration(1000*interval) * time.Millisecond)
+
 		if err := findCondition(dExt); err == nil {
 			// do action after found
 			return foundAction(dExt)
@@ -79,9 +83,6 @@ func (dExt *DriverExt) LoopUntil(findAction, findCondition, foundAction Action, 
 		if err := findAction(dExt); err != nil {
 			log.Error().Err(err).Msgf("find action failed")
 		}
-
-		// wait interval between each findAction
-		time.Sleep(time.Duration(1000*interval) * time.Millisecond)
 	}
 
 	return errors.Wrap(code.LoopActionNotFoundError,
@@ -132,21 +133,31 @@ func (dExt *DriverExt) swipeToTapTexts(texts []string, options ...ActionOption) 
 		return errors.New("no text to tap")
 	}
 
+	options = append(options, WithMatchOne(true), WithRegex(true))
+	actionOptions := NewActionOptions(options...)
+	actionOptions.Identifier = ""
+	optionsWithoutIdentifier := actionOptions.Options()
 	var point PointF
 	findTexts := func(d *DriverExt) error {
 		var err error
-		screenTexts, err := d.GetScreenTexts()
+		screenResult, err := d.GetScreenResult(
+			WithScreenShotOCR(true),
+			WithScreenShotUpload(true),
+			WithScreenShotClosePopups(true),
+		)
 		if err != nil {
 			return err
 		}
-		points, err := screenTexts.FindTexts(texts, dExt.ParseActionOptions(options...)...)
+		points, err := screenResult.Texts.FindTexts(texts, dExt.ParseActionOptions(optionsWithoutIdentifier...)...)
 		if err != nil {
+			log.Error().Err(err).Msg("swipeToTapTexts failed")
 			// target texts not found, try to auto handle popup
-			if e := dExt.AutoPopupHandler(screenTexts); e != nil {
+			if e := dExt.tapPopupHandler(screenResult.Popup); e != nil {
 				log.Error().Err(e).Msg("auto handle popup failed")
 			}
 			return err
 		}
+		log.Info().Strs("texts", texts).Interface("results", points).Msg("swipeToTapTexts successful")
 
 		// target texts found, pick the first one
 		point = points[0].Center() // FIXME
@@ -157,8 +168,8 @@ func (dExt *DriverExt) swipeToTapTexts(texts []string, options ...ActionOption) 
 		return d.TapAbsXY(point.X, point.Y, options...)
 	}
 
-	findAction := dExt.prepareSwipeAction(options...)
-	return dExt.LoopUntil(findAction, findTexts, foundTextAction, options...)
+	findAction := dExt.prepareSwipeAction(optionsWithoutIdentifier...)
+	return dExt.LoopUntil(findAction, findTexts, foundTextAction, optionsWithoutIdentifier...)
 }
 
 func (dExt *DriverExt) swipeToTapApp(appName string, options ...ActionOption) error {
@@ -172,8 +183,21 @@ func (dExt *DriverExt) swipeToTapApp(appName string, options ...ActionOption) er
 		dExt.SwipeRight()
 	}
 
-	options = append(options, WithOffset(0, -25)) // tap app icon above the text
 	options = append(options, WithDirection("left"))
+
+	actionOptions := NewActionOptions(options...)
+	// default to retry 5 times
+	if actionOptions.MaxRetryTimes == 0 {
+		options = append(options, WithMaxRetryTimes(5))
+	}
+	// tap app icon above the text
+	if len(actionOptions.Offset) == 0 {
+		options = append(options, WithTapOffset(0, -25))
+	}
+	// set default swipe interval to 1 second
+	if builtin.IsZeroFloat64(actionOptions.Interval) {
+		options = append(options, WithInterval(1))
+	}
 
 	return dExt.swipeToTapTexts([]string{appName}, options...)
 }

@@ -2,8 +2,13 @@ package uixt
 
 import (
 	"bytes"
+	"math"
 	"strings"
 	"time"
+
+	"github.com/httprunner/funplugin"
+
+	"github.com/httprunner/httprunner/v4/hrp/internal/builtin"
 )
 
 var (
@@ -432,16 +437,40 @@ type PointF struct {
 	Y float64 `json:"y"`
 }
 
+func (p PointF) IsIdentical(p2 PointF) bool {
+	return builtin.IsZeroFloat64(math.Abs(p.X-p2.X)) &&
+		builtin.IsZeroFloat64(math.Abs(p.Y-p2.Y))
+}
+
 type Rect struct {
 	Point
 	Size
+}
+
+type DriverOptions struct {
+	capabilities Capabilities
+	plugin       funplugin.IPlugin
+}
+
+type DriverOption func(*DriverOptions)
+
+func WithDriverCapabilities(capabilities Capabilities) DriverOption {
+	return func(options *DriverOptions) {
+		options.capabilities = capabilities
+	}
+}
+
+func WithDriverPlugin(plugin funplugin.IPlugin) DriverOption {
+	return func(options *DriverOptions) {
+		options.plugin = plugin
+	}
 }
 
 // current implemeted device: IOSDevice, AndroidDevice
 type Device interface {
 	UUID() string // ios udid or android serial
 	LogEnabled() bool
-	NewDriver(capabilities Capabilities) (driverExt *DriverExt, err error)
+	NewDriver(...DriverOption) (driverExt *DriverExt, err error)
 
 	StartPerf() error
 	StopPerf() string

@@ -2,7 +2,6 @@ package uixt
 
 import (
 	"bytes"
-	"encoding/json"
 	"fmt"
 	"image"
 	"image/gif"
@@ -15,14 +14,17 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
 
+	"github.com/httprunner/funplugin"
 	"github.com/pkg/errors"
 	"github.com/rs/zerolog/log"
 
 	"github.com/httprunner/httprunner/v4/hrp/internal/builtin"
+	"github.com/httprunner/httprunner/v4/hrp/internal/code"
 	"github.com/httprunner/httprunner/v4/hrp/internal/env"
 )
 
@@ -48,35 +50,90 @@ func WithThreshold(threshold float64) CVOption {
 	}
 }
 
-type Popularity struct {
-	Stars     string `json:"stars,omitempty"`      // 点赞数
-	Comments  string `json:"comments,omitempty"`   // 评论数
-	Favorites string `json:"favorites,omitempty"`  // 收藏数
-	Shares    string `json:"shares,omitempty"`     // 分享数
-	LiveUsers string `json:"live_users,omitempty"` // 直播间人数
+type ScreenResult struct {
+	bufSource   *bytes.Buffer // raw image buffer bytes
+	imagePath   string        // image file path
+	imageResult *ImageResult  // image result
+
+	Resolution  Size        `json:"resolution"`
+	UploadedURL string      `json:"uploaded_url"` // uploaded image url
+	Texts       OCRTexts    `json:"texts"`        // dumped raw OCRTexts
+	Icons       UIResultMap `json:"icons"`        // CV 识别的图标
+	Tags        []string    `json:"tags"`         // tags for image, e.g. ["feed", "ad", "live"]
+	Video       *Video      `json:"video,omitempty"`
+	Popup       *PopupInfo  `json:"popup,omitempty"`
+
+	SwipeStartTime  int64 `json:"swipe_start_time"`  // 滑动开始时间戳
+	SwipeFinishTime int64 `json:"swipe_finish_time"` // 滑动结束时间戳
+
+	ScreenshotTakeElapsed int64 `json:"screenshot_take_elapsed"` // 设备截图耗时(ms)
+	ScreenshotCVElapsed   int64 `json:"screenshot_cv_elapsed"`   // CV 识别耗时(ms)
+
+	// 当前 Feed/Live 整体耗时
+	TotalElapsed int64 `json:"total_elapsed"` // current_swipe_finish -> next_swipe_start 整体耗时(ms)
 }
 
-type ScreenResult struct {
-	Texts      OCRTexts   `json:"texts"`      // dumped OCRTexts
-	Tags       []string   `json:"tags"`       // tags for image, e.g. ["feed", "ad", "live"]
-	Popularity Popularity `json:"popularity"` // video popularity data
+type ScreenResultMap map[string]*ScreenResult // key is date time
+
+// getScreenShotUrls returns screenShotsUrls using imagePath as key and uploaded URL as value
+func (screenResults ScreenResultMap) getScreenShotUrls() map[string]string {
+	screenShotsUrls := make(map[string]string)
+	for _, screenResult := range screenResults {
+		if screenResult.UploadedURL == "" {
+			continue
+		}
+		screenShotsUrls[screenResult.imagePath] = screenResult.UploadedURL
+	}
+	return screenShotsUrls
+}
+
+// updatePopupCloseStatus checks if popup closed normally in every screenResult with close_popups on:
+func (screenResults ScreenResultMap) updatePopupCloseStatus() {
+	var popupScreenResultList []*ScreenResult
+	for _, screenResult := range screenResults {
+		if screenResult.Popup == nil {
+			continue
+		}
+		popupScreenResultList = append(popupScreenResultList, screenResult)
+	}
+	if len(popupScreenResultList) == 0 {
+		return
+	}
+	sort.Slice(popupScreenResultList, func(i, j int) bool {
+		return popupScreenResultList[i].Popup.RetryCount < popupScreenResultList[j].Popup.RetryCount
+	})
+
+	for i := 0; i < len(popupScreenResultList)-1; i++ {
+		curPopup := popupScreenResultList[i].Popup
+		nextPopup := popupScreenResultList[i+1].Popup
+
+		// popup not existed, no need to close
+		if curPopup.CloseArea.IsEmpty() {
+			continue
+		}
+		// popup existed, but identical popups occurs during next retry
+		if nextPopup.CloseArea.IsIdentical(curPopup.CloseArea) {
+			popupScreenResultList[i].Popup.CloseStatus = CloseStatusFail
+			continue
+		}
+		// popup existed, but no popup or different popup occurs during next retry (IsClosed=true)
+		popupScreenResultList[i].Popup.CloseStatus = CloseStatusSuccess
+	}
 }
 
 type cacheStepData struct {
 	// cache step screenshot paths
-	screenShots     []string
-	screenShotsUrls map[string]string // map screenshot file path to uploaded url
+	screenShots []string
 	// cache step screenshot ocr results, key is image path, value is ScreenResult
-	screenResults map[string]*ScreenResult
+	screenResults ScreenResultMap
 	// cache feed/live video stat
-	videoStat *VideoStat
+	videoCrawler *VideoCrawler
 }
 
 func (d *cacheStepData) reset() {
 	d.screenShots = make([]string, 0)
-	d.screenShotsUrls = make(map[string]string)
 	d.screenResults = make(map[string]*ScreenResult)
-	d.videoStat = nil
+	d.videoCrawler = nil
 }
 
 type DriverExt struct {
@@ -91,15 +148,26 @@ type DriverExt struct {
 
 	// cache step data
 	cacheStepData cacheStepData
+
+	// funplugin
+	plugin funplugin.IPlugin
 }
 
-func NewDriverExt(device Device, driver WebDriver) (dExt *DriverExt, err error) {
+func newDriverExt(device Device, driver WebDriver, plugin funplugin.IPlugin) (dExt *DriverExt, err error) {
 	dExt = &DriverExt{
 		Device:          device,
 		Driver:          driver,
+		plugin:          plugin,
 		cacheStepData:   cacheStepData{},
 		interruptSignal: make(chan os.Signal, 1),
 	}
+
+	err = dExt.extendCV()
+	if err != nil {
+		return nil, errors.Wrap(code.MobileUIDriverError,
+			fmt.Sprintf("extend OpenCV failed: %v", err))
+	}
+
 	dExt.cacheStepData.reset()
 	signal.Notify(dExt.interruptSignal, syscall.SIGTERM, syscall.SIGINT)
 	dExt.doneMjpegStream = make(chan bool, 1)
@@ -107,10 +175,10 @@ func NewDriverExt(device Device, driver WebDriver) (dExt *DriverExt, err error) 
 	// get device window size
 	dExt.windowSize, err = dExt.Driver.WindowSize()
 	if err != nil {
-		return nil, err
+		return nil, errors.Wrap(err, "get screen resolution failed")
 	}
 
-	if dExt.ImageService, err = newVEDEMImageService("ocr", "upload", "liveType"); err != nil {
+	if dExt.ImageService, err = newVEDEMImageService(); err != nil {
 		return nil, err
 	}
 
@@ -201,31 +269,12 @@ func (dExt *DriverExt) saveScreenShot(raw *bytes.Buffer, fileName string) (strin
 
 func (dExt *DriverExt) GetStepCacheData() map[string]interface{} {
 	cacheData := make(map[string]interface{})
-	cacheData["video_stat"] = dExt.cacheStepData.videoStat
+	cacheData["video_stat"] = dExt.cacheStepData.videoCrawler
 	cacheData["screenshots"] = dExt.cacheStepData.screenShots
-	cacheData["screenshots_urls"] = dExt.cacheStepData.screenShotsUrls
 
-	screenSize, err := dExt.Driver.WindowSize()
-	if err != nil {
-		log.Warn().Err(err).Msg("get screen resolution failed")
-		screenSize = Size{}
-	}
-	screenResults := make(map[string]interface{})
-	for imagePath, screenResult := range dExt.cacheStepData.screenResults {
-		o, _ := json.Marshal(screenResult.Texts)
-		data := map[string]interface{}{
-			"tags":       screenResult.Tags,
-			"texts":      string(o),
-			"popularity": screenResult.Popularity,
-			"resolution": map[string]int{
-				"width":  screenSize.Width,
-				"height": screenSize.Height,
-			},
-		}
-
-		screenResults[imagePath] = data
-	}
-	cacheData["screen_results"] = screenResults
+	cacheData["screenshots_urls"] = dExt.cacheStepData.screenResults.getScreenShotUrls()
+	dExt.cacheStepData.screenResults.updatePopupCloseStatus()
+	cacheData["screen_results"] = dExt.cacheStepData.screenResults
 
 	// clear cache
 	dExt.cacheStepData.reset()
@@ -253,31 +302,71 @@ func (dExt *DriverExt) FindUIRectInUIKit(search string, options ...ActionOption)
 	return dExt.FindImageRectInUIKit(search, options...)
 }
 
-func (dExt *DriverExt) IsOCRExist(text string) bool {
-	_, err := dExt.FindScreenText(text)
-	return err == nil
+func (dExt *DriverExt) AssertOCR(text, assert string) bool {
+	var err error
+	switch assert {
+	case AssertionEqual:
+		_, err = dExt.FindScreenText(text)
+		return err == nil
+	case AssertionNotEqual:
+		_, err = dExt.FindScreenText(text)
+		return err != nil
+	case AssertionExists:
+		_, err = dExt.FindScreenText(text, WithRegex(true))
+		return err == nil
+	case AssertionNotExists:
+		_, err = dExt.FindScreenText(text, WithRegex(true))
+		return err != nil
+	default:
+		log.Warn().Str("assert method", assert).Msg("unexpected assert method")
+	}
+	return false
 }
 
-func (dExt *DriverExt) IsImageExist(text string) bool {
-	_, err := dExt.FindImageRectInUIKit(text)
-	return err == nil
+func (dExt *DriverExt) AssertImage(imagePath, assert string) bool {
+	var err error
+	switch assert {
+	case AssertionExists:
+		_, err = dExt.FindImageRectInUIKit(imagePath)
+		return err == nil
+	case AssertionNotExists:
+		_, err = dExt.FindImageRectInUIKit(imagePath)
+		return err != nil
+	default:
+		log.Warn().Str("assert method", assert).Msg("unexpected assert method")
+	}
+	return false
+}
+
+func (dExt *DriverExt) AssertForegroundApp(appName, assert string) bool {
+	app, err := dExt.Driver.GetForegroundApp()
+	if err != nil {
+		log.Warn().Err(err).Msg("get foreground app failed, skip app/activity assertion")
+		return true // Notice: ignore error when get foreground app failed
+	}
+	log.Debug().Interface("app", app).Msg("get foreground app")
+
+	// assert package name
+	switch assert {
+	case AssertionEqual:
+		return app.PackageName == appName
+	case AssertionNotEqual:
+		return app.PackageName != appName
+	default:
+		log.Warn().Str("assert method", assert).Msg("unexpected assert method")
+	}
+	return false
 }
 
 func (dExt *DriverExt) DoValidation(check, assert, expected string, message ...string) bool {
-	var exp bool
-	if assert == AssertionExists || assert == AssertionEqual {
-		exp = true
-	} else {
-		exp = false
-	}
 	var result bool
 	switch check {
 	case SelectorOCR:
-		result = (dExt.IsOCRExist(expected) == exp)
+		result = dExt.AssertOCR(expected, assert)
 	case SelectorImage:
-		result = (dExt.IsImageExist(expected) == exp)
+		result = dExt.AssertImage(expected, assert)
 	case SelectorForegroundApp:
-		result = ((dExt.Driver.AssertForegroundApp(expected) == nil) == exp)
+		result = dExt.AssertForegroundApp(expected, assert)
 	}
 
 	if !result {

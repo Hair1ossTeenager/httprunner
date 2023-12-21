@@ -1,153 +1,15 @@
 package uixt
 
 import (
-	"strings"
+	"math"
 	"time"
 
 	"github.com/pkg/errors"
 	"github.com/rs/zerolog/log"
 
 	"github.com/httprunner/httprunner/v4/hrp/internal/code"
+	"github.com/httprunner/httprunner/v4/hrp/internal/json"
 )
-
-type VideoStat struct {
-	configs *VideoCrawlerConfigs
-	timer   *time.Timer
-
-	FeedCount int            `json:"feed_count"`
-	FeedStat  map[string]int `json:"feed_stat"` // 分类统计 feed 数量：视频/图文/广告/特效/模板/购物
-	LiveCount int            `json:"live_count"`
-	LiveStat  map[string]int `json:"live_stat"` // 分类统计 live 数量：秀场/游戏/电商/多人
-}
-
-func (s *VideoStat) isFeedTargetAchieved() bool {
-	targetStat := make(map[string]int)
-	for _, targetLabel := range s.configs.Feed.TargetLabels {
-		targetStat[targetLabel.Text] = targetLabel.Target
-	}
-
-	log.Info().
-		Int("current_total", s.FeedCount).
-		Interface("current_stat", s.FeedStat).
-		Int("target_total", s.configs.Feed.TargetCount).
-		Interface("target_stat", targetStat).
-		Msg("display feed crawler progress")
-
-	// check total feed count
-	if s.FeedCount < s.configs.Feed.TargetCount {
-		return false
-	}
-
-	// check each feed type's count
-	for _, targetLabel := range s.configs.Feed.TargetLabels {
-		if s.FeedStat[targetLabel.Text] < targetLabel.Target {
-			return false
-		}
-	}
-
-	return true
-}
-
-func (s *VideoStat) isLiveTargetAchieved() bool {
-	targetStat := make(map[string]int)
-	for _, targetLabel := range s.configs.Live.TargetLabels {
-		targetStat[targetLabel.Text] = targetLabel.Target
-	}
-
-	log.Info().
-		Int("current_total", s.LiveCount).
-		Interface("current_stat", s.LiveStat).
-		Int("target_total", s.configs.Live.TargetCount).
-		Interface("target_stat", targetStat).
-		Msg("display live crawler progress")
-
-	// check total live count
-	if s.LiveCount < s.configs.Live.TargetCount {
-		return false
-	}
-
-	// check each live type's count
-	for _, targetLabel := range s.configs.Live.TargetLabels {
-		if s.LiveStat[targetLabel.Text] < targetLabel.Target {
-			return false
-		}
-	}
-
-	return true
-}
-
-func (s *VideoStat) isTargetAchieved() bool {
-	return s.isFeedTargetAchieved() && s.isLiveTargetAchieved()
-}
-
-// incrFeed increases feed count and feed stat
-func (s *VideoStat) incrFeed(screenResult *ScreenResult, driverExt *DriverExt) error {
-	// feed author
-	actionOptions := []ActionOption{
-		WithRegex(true),
-		driverExt.GenAbsScope(0, 0.5, 1, 1).Option(),
-	}
-	if ocrText, err := screenResult.Texts.FindText("^@", actionOptions...); err == nil {
-		log.Debug().Str("author", ocrText.Text).Msg("found feed author")
-		screenResult.Tags = append(screenResult.Tags, ocrText.Text)
-	}
-
-	for _, targetLabel := range s.configs.Feed.TargetLabels {
-		scope := targetLabel.Scope
-		actionOptions := []ActionOption{
-			WithRegex(targetLabel.Regex),
-			driverExt.GenAbsScope(scope[0], scope[1], scope[2], scope[3]).Option(),
-		}
-		if _, err := screenResult.Texts.FindText(targetLabel.Text, actionOptions...); err == nil {
-			key := targetLabel.Text
-			if _, ok := s.FeedStat[key]; !ok {
-				s.FeedStat[key] = 0
-			}
-			s.FeedStat[key]++
-			screenResult.Tags = append(screenResult.Tags, key)
-		}
-	}
-
-	// add popularity data for feed
-	popularityData := screenResult.Texts.FilterScope(driverExt.GenAbsScope(0.8, 0.5, 1, 0.8))
-	if len(popularityData) != 4 {
-		log.Warn().Interface("popularity", popularityData).Msg("get feed popularity data failed")
-	} else {
-		screenResult.Popularity = Popularity{
-			Stars:     popularityData[0].Text,
-			Comments:  popularityData[1].Text,
-			Favorites: popularityData[2].Text,
-			Shares:    popularityData[3].Text,
-		}
-	}
-
-	log.Info().Strs("tags", screenResult.Tags).
-		Interface("popularity", screenResult.Popularity).
-		Msg("found feed success")
-	s.FeedCount++
-	return nil
-}
-
-// incrLive increases live count and live stat
-func (s *VideoStat) incrLive(screenResult *ScreenResult, driverExt *DriverExt) error {
-	// TODO: check live type
-
-	// add popularity data for live
-	popularityData := screenResult.Texts.FilterScope(driverExt.GenAbsScope(0.7, 0.05, 1, 0.15))
-	if len(popularityData) != 1 {
-		log.Warn().Interface("popularity", popularityData).Msg("get live popularity data failed")
-	} else {
-		screenResult.Popularity = Popularity{
-			LiveUsers: popularityData[0].Text,
-		}
-	}
-
-	log.Info().Strs("tags", screenResult.Tags).
-		Interface("popularity", screenResult.Popularity).
-		Msg("found live success")
-	s.LiveCount++
-	return nil
-}
 
 type TargetLabel struct {
 	Text   string `json:"text"`
@@ -169,138 +31,101 @@ type LiveConfig struct {
 }
 
 type VideoCrawlerConfigs struct {
-	AppPackageName string `json:"app_package_name"`
-	Timeout        int    `json:"timeout"` // seconds
+	Timeout int `json:"timeout"` // seconds
 
 	Feed FeedConfig `json:"feed"`
 	Live LiveConfig `json:"live"`
 }
 
-type LiveCrawler struct {
-	driver      *DriverExt
-	configs     *VideoCrawlerConfigs // target video count
-	currentStat *VideoStat           // current video stat
+type VideoCrawler struct {
+	driverExt *DriverExt
+	configs   *VideoCrawlerConfigs
+	timer     *time.Timer
+
+	// used to help checking if swipe success
+	failedCount int64
+
+	FeedCount int            `json:"feed_count"`
+	FeedStat  map[string]int `json:"feed_stat"` // 分类统计 feed 数量：视频/图文/广告/特效/模板/购物
+	LiveCount int            `json:"live_count"`
+	LiveStat  map[string]int `json:"live_stat"` // 分类统计 live 数量：秀场/游戏/电商/多人
 }
 
-func (l *LiveCrawler) checkLiveVideo(texts OCRTexts) (enterPoint PointF, yes bool) {
-	// 预览流入口：DY/KS
-	// 标签文案：点击进入直播间|进入直播间领金币
-	points, err := texts.FindTexts([]string{".*进入直播间.*"}, WithScope(0, 0.3, 1, 0.8), WithRegex(true))
-	if err == nil {
-		return points[0].Center(), true
-	}
-	// 标签文案：直播中|直播卖货|直播团购
-	points, err = texts.FindTexts([]string{"直播中|直播卖货|直播团购"},
-		WithScope(0, 0.7, 0.5, 1), WithRegex(true))
-	if err == nil {
-		return points[0].Center(), true
+func (vc *VideoCrawler) isFeedTargetAchieved() bool {
+	targetStat := make(map[string]int)
+	for _, targetLabel := range vc.configs.Feed.TargetLabels {
+		targetStat[targetLabel.Text] = targetLabel.Target
 	}
 
-	// 预览流入口：KS/KSLite
-	// 评论框文案：和主播聊聊天...|聊聊天...
-	points, err = texts.FindTexts([]string{".*聊聊天.*"}, WithRegex(true))
-	if err == nil {
-		point := points[0].Center()
-		enterPoint = PointF{
-			X: point.X,
-			Y: point.Y - 300,
-		}
-		return enterPoint, true
+	log.Info().
+		Int("current_total", vc.FeedCount).
+		Interface("current_stat", vc.FeedStat).
+		Int("target_total", vc.configs.Feed.TargetCount).
+		Interface("target_stat", targetStat).
+		Msg("display feed crawler progress")
+
+	// check total feed count
+	if vc.FeedCount < vc.configs.Feed.TargetCount {
+		return false
 	}
 
-	// TODO: 头像入口
-
-	return PointF{}, false
-}
-
-// run live video crawler
-func (l *LiveCrawler) Run(driver *DriverExt, enterPoint PointF) error {
-	log.Info().Msg("enter live room")
-	if err := driver.TapAbsXY(enterPoint.X, enterPoint.Y); err != nil {
-		log.Error().Err(err).Msg("tap live video failed")
-		return err
-	}
-	time.Sleep(5 * time.Second)
-
-	for !l.currentStat.isLiveTargetAchieved() {
-		select {
-		case <-l.currentStat.timer.C:
-			log.Warn().Msg("timeout in live crawler")
-			return errors.Wrap(code.TimeoutError, "live crawler timeout")
-		case <-l.driver.interruptSignal:
-			log.Warn().Msg("interrupted in live crawler")
-			return errors.Wrap(code.InterruptError, "live crawler interrupted")
-		default:
-			// check if live room
-			if err := l.driver.Driver.AssertForegroundApp(l.configs.AppPackageName, "live"); err != nil {
-				return err
-			}
-
-			// swipe to next live video
-			err := l.driver.SwipeUp()
-			if err != nil {
-				log.Error().Err(err).Msg("swipe up failed")
-				// TODO: retry maximum 3 times
-				continue
-			}
-
-			// sleep custom random time
-			if err := sleepRandom(time.Now(), l.configs.Live.SleepRandom); err != nil {
-				log.Error().Err(err).Msg("sleep random failed")
-			}
-
-			// take screenshot and get screen texts by OCR
-			screenResult, err := l.driver.GetScreenResult()
-			if err != nil {
-				log.Error().Err(err).Msg("OCR GetTexts failed")
-				time.Sleep(3 * time.Second)
-				continue
-			}
-			screenResult.Tags = append([]string{"live"}, screenResult.Tags...)
-
-			// check live type and incr live count
-			if err := l.currentStat.incrLive(screenResult, l.driver); err != nil {
-				log.Error().Err(err).Msg("incr live failed")
-			}
+	// check each feed type's count
+	for _, targetLabel := range vc.configs.Feed.TargetLabels {
+		if vc.FeedStat[targetLabel.Text] < targetLabel.Target {
+			return false
 		}
 	}
 
-	log.Info().Msg("live count achieved, exit live room")
-
-	return l.exitLiveRoom()
+	return true
 }
 
-func (l *LiveCrawler) exitLiveRoom() error {
-	for i := 0; i < 3; i++ {
-		l.driver.SwipeRelative(0.1, 0.5, 0.9, 0.5)
-		time.Sleep(2 * time.Second)
+func (vc *VideoCrawler) isLiveTargetAchieved() bool {
+	targetStat := make(map[string]int)
+	for _, targetLabel := range vc.configs.Live.TargetLabels {
+		targetStat[targetLabel.Text] = targetLabel.Target
+	}
 
-		// check if back to feed page
-		if err := l.driver.Driver.AssertForegroundApp(l.configs.AppPackageName, "feed"); err == nil {
-			return nil
+	log.Info().
+		Int("current_total", vc.LiveCount).
+		Interface("current_stat", vc.LiveStat).
+		Int("target_total", vc.configs.Live.TargetCount).
+		Interface("target_stat", targetStat).
+		Msg("display live crawler progress")
+
+	// check total live count
+	if vc.LiveCount < vc.configs.Live.TargetCount {
+		return false
+	}
+
+	// check each live type's count
+	for _, targetLabel := range vc.configs.Live.TargetLabels {
+		if vc.LiveStat[targetLabel.Text] < targetLabel.Target {
+			return false
 		}
 	}
 
-	// exit live room failed, while video count achieved
-	if l.currentStat.isTargetAchieved() {
-		return nil
-	}
-
-	// click X button on upper-right corner
-	if err := l.driver.TapXY(0.95, 0.05); err == nil {
-		log.Info().Msg("tap X button on upper-right corner to exit live room")
-		time.Sleep(2 * time.Second)
-
-		// check if back to feed page
-		if err := l.driver.Driver.AssertForegroundApp(l.configs.AppPackageName, "feed"); err == nil {
-			return nil
-		}
-	}
-
-	return errors.New("exit live room failed")
+	return true
 }
+
+func (vc *VideoCrawler) isTargetAchieved() bool {
+	return vc.isFeedTargetAchieved() && vc.isLiveTargetAchieved()
+}
+
+func (vc *VideoCrawler) exitLiveRoom() error {
+	log.Info().Msg("press back to exit live room")
+	return vc.driverExt.Driver.PressBack()
+}
+
+const (
+	FOUND_FEED_SUCCESS = "found feed success"
+	FOUND_LIVE_SUCCESS = "found live success"
+)
 
 func (dExt *DriverExt) VideoCrawler(configs *VideoCrawlerConfigs) (err error) {
+	if dExt.plugin == nil {
+		return errors.New("miss plugin for video crawler")
+	}
+
 	// set default sleep random strategy if not set
 	if configs.Feed.SleepRandom == nil {
 		configs.Feed.SleepRandom = []interface{}{1, 5}
@@ -309,118 +134,276 @@ func (dExt *DriverExt) VideoCrawler(configs *VideoCrawlerConfigs) (err error) {
 		configs.Live.SleepRandom = []interface{}{10, 15}
 	}
 
-	currVideoStat := &VideoStat{
-		configs: configs,
+	crawler := &VideoCrawler{
+		driverExt: dExt,
+		configs:   configs,
 
-		FeedCount: 0,
-		FeedStat:  make(map[string]int),
-		LiveCount: 0,
-		LiveStat:  make(map[string]int),
+		failedCount: 0,
+		FeedCount:   0,
+		FeedStat:    make(map[string]int),
+		LiveCount:   0,
+		LiveStat:    make(map[string]int),
 	}
 	defer func() {
-		dExt.cacheStepData.videoStat = currVideoStat
+		dExt.cacheStepData.videoCrawler = crawler
 	}()
-
-	// launch app
-	if configs.AppPackageName != "" {
-		if err = dExt.Driver.AppLaunch(configs.AppPackageName); err != nil {
-			return err
-		}
-		time.Sleep(5 * time.Second)
-	} else {
-		app, err := dExt.Driver.GetForegroundApp()
-		if err != nil && !errors.Is(err, errDriverNotImplemented) {
-			log.Warn().Err(err).Msg("get foreground app failed, ignore")
-			return errors.Wrap(code.MobileUIAssertForegroundAppError, err.Error())
-		}
-		log.Info().
-			Str("packageName", app.PackageName).
-			Str("activity", app.Activity).
-			Msg("start to video crawler for current foreground app")
-		configs.AppPackageName = app.PackageName
-	}
-
-	liveCrawler := LiveCrawler{
-		driver:      dExt,
-		configs:     configs,
-		currentStat: currVideoStat,
-	}
 
 	// loop until target count achieved or timeout
 	// the main loop is feed crawler
-	currVideoStat.timer = time.NewTimer(time.Duration(configs.Timeout) * time.Second)
-	lastSwipeTime := time.Now()
+	crawler.timer = time.NewTimer(time.Duration(configs.Timeout) * time.Second)
 	for {
 		select {
-		case <-currVideoStat.timer.C:
+		case <-crawler.timer.C:
 			log.Warn().Msg("timeout in feed crawler")
 			return errors.Wrap(code.TimeoutError, "feed crawler timeout")
 		case <-dExt.interruptSignal:
 			log.Warn().Msg("interrupted in feed crawler")
 			return errors.Wrap(code.InterruptError, "feed crawler interrupted")
 		default:
-			// take screenshot and get screen texts by OCR
-			screenResult, err := dExt.GetScreenResult()
-			if err != nil {
-				if strings.Contains(err.Error(), "connect: connection refused") {
+			// swipe to next feed video
+			log.Info().Msg("swipe to next feed video")
+			swipeStartTime := time.Now()
+			if err = dExt.SwipeRelative(0.9, 0.8, 0.9, 0.1, WithOffsetRandomRange(-10, 10)); err != nil {
+				log.Error().Err(err).Msg("feed swipe up failed")
+				return err
+			}
+			swipeFinishTime := time.Now()
+
+			// get app event trackings
+			// retry 10 times if get feed failed, abort if fail 10 consecutive times
+			feedVideo, err := crawler.getCurrentVideo()
+			if err != nil || feedVideo.Type == "" {
+				if crawler.failedCount >= 10 {
+					// failed 10 consecutive times
+					return errors.Wrap(code.TrackingGetError,
+						"get current feed video failed 10 consecutive times")
+				}
+				log.Warn().Msg("get current feed video failed")
+
+				// check and handle popups
+				if err := crawler.driverExt.ClosePopupsHandler(WithMaxRetryTimes(3)); err != nil {
 					return err
 				}
-				log.Error().Err(err).Msg("OCR GetTexts failed")
-				time.Sleep(3 * time.Second)
+
+				// retry
+				crawler.failedCount++
 				continue
 			}
 
-			// automatic handling of pop-up windows
-			if err := dExt.AutoPopupHandler(screenResult.Texts); err != nil {
-				log.Error().Err(err).Msg("auto handle popup failed")
-				return err
+			screenResult := &ScreenResult{
+				Resolution: dExt.windowSize,
+				Video:      feedVideo,
+
+				// log swipe timelines
+				SwipeStartTime:  swipeStartTime.UnixMilli(),
+				SwipeFinishTime: swipeFinishTime.UnixMilli(),
 			}
 
-			// check if live video && run live crawler
-			if enterPoint, isLive := liveCrawler.checkLiveVideo(screenResult.Texts); isLive {
-				log.Info().Msg("live video found")
-				if !liveCrawler.currentStat.isLiveTargetAchieved() {
-					if err := liveCrawler.Run(dExt, enterPoint); err != nil {
+			switch feedVideo.Type {
+			case VideoType_PreviewLive:
+				// 直播预览流
+				if crawler.isLiveTargetAchieved() {
+					// 达标后不再进入直播间
+					crawler.LiveCount++
+					dExt.cacheStepData.screenResults[time.Now().String()] = screenResult
+					// 观播时长取随机时长与仿真时长的最小值
+					sleepTime := math.Min(float64(feedVideo.SimulationPlayDuration), float64(feedVideo.RandomPlayDuration))
+					feedVideo.PlayDuration = int64(sleepTime)
+					log.Info().
+						Strs("tags", screenResult.Tags).
+						Interface("video", feedVideo).
+						Msg(FOUND_LIVE_SUCCESS)
+					// simulation watch feed video
+					sleepStrict(swipeFinishTime, feedVideo.PlayDuration)
+					break
+				} else {
+					time.Sleep(1 * time.Second)
+					// live target not achieved, enter live
+					entryPoint := PointF{
+						X: float64(dExt.windowSize.Width / 2),
+						Y: float64(dExt.windowSize.Height / 2),
+					}
+
+					log.Info().Msg("tap screen center to enter live room")
+					if err := crawler.driverExt.TapAbsXY(entryPoint.X, entryPoint.Y,
+						WithOffsetRandomRange(-20, 20)); err != nil {
+						log.Error().Err(err).Msg("tap live video failed")
+						continue
+					}
+				}
+				fallthrough
+
+			case VideoType_Live:
+				// 直播
+				log.Info().
+					Strs("tags", screenResult.Tags).
+					Interface("video", feedVideo).
+					Msg(FOUND_LIVE_SUCCESS)
+
+				// take screenshot and get screen texts by OCR
+				screenResultFromOCR, err := crawler.driverExt.GetScreenResult(
+					WithScreenShotOCR(true),
+					WithScreenShotUpload(true),
+					WithScreenShotLiveType(true),
+					WithScreenShotClosePopups(true),
+				)
+				if err != nil {
+					log.Error().Err(err).Msg("get screen result failed")
+					time.Sleep(3 * time.Second)
+					continue
+				}
+				if e := crawler.driverExt.tapPopupHandler(screenResultFromOCR.Popup); e != nil {
+					log.Error().Err(e).Msg("auto handle popup failed")
+					continue
+				}
+
+				// add live type
+				if screenResultFromOCR.imageResult != nil &&
+					screenResultFromOCR.imageResult.LiveType != "" &&
+					screenResultFromOCR.imageResult.LiveType != "NoLive" {
+					screenResult.Video.LiveType = screenResultFromOCR.imageResult.LiveType
+				}
+
+				crawler.LiveCount++
+				// simulation watch feed video
+				sleepStrict(swipeFinishTime, screenResult.Video.PlayDuration)
+
+				screenResultFromOCR.Video = screenResult.Video
+				screenResultFromOCR.Resolution = screenResult.Resolution
+				screenResultFromOCR.SwipeStartTime = screenResult.SwipeStartTime
+				screenResultFromOCR.SwipeFinishTime = screenResult.SwipeFinishTime
+				screenResultFromOCR.TotalElapsed = time.Since(swipeFinishTime).Milliseconds()
+
+				if crawler.isLiveTargetAchieved() {
+					log.Info().Interface("live", screenResult.Video).
+						Msg("live count achieved, exit live house")
+					err = crawler.exitLiveRoom()
+					if err != nil {
 						if errors.Is(err, code.TimeoutError) || errors.Is(err, code.InterruptError) {
 							return err
 						}
 						log.Error().Err(err).Msg("run live crawler failed, continue")
-						continue
 					}
 				}
-				screenResult.Tags = []string{"live-preview"}
-			} else {
-				screenResult.Tags = []string{"feed"}
 
-				// check feed type and incr feed count
-				if err := currVideoStat.incrFeed(screenResult, dExt); err != nil {
-					log.Error().Err(err).Msg("incr feed failed")
-				}
-			}
+			default:
+				// 点播 || 图文 || 广告 || etc.
+				crawler.FeedCount++
+				dExt.cacheStepData.screenResults[time.Now().String()] = screenResult
+				log.Info().
+					Strs("tags", screenResult.Tags).
+					Interface("video", feedVideo).
+					Msg(FOUND_FEED_SUCCESS)
 
-			// sleep custom random time
-			if err := sleepRandom(lastSwipeTime, configs.Feed.SleepRandom); err != nil {
-				log.Error().Err(err).Msg("sleep random failed")
+				// simulation watch feed video
+				sleepStrict(swipeFinishTime, screenResult.Video.PlayDuration)
 			}
+			screenResult.TotalElapsed = time.Since(swipeFinishTime).Milliseconds()
 
 			// check if target count achieved
-			if currVideoStat.isTargetAchieved() {
+			if crawler.isTargetAchieved() {
 				log.Info().Msg("target count achieved, exit crawler")
 				return nil
 			}
 
-			// swipe to next feed video
-			log.Info().Msg("swipe to next feed video")
-			if err = dExt.SwipeUp(); err != nil {
-				log.Error().Err(err).Msg("swipe up failed")
-				return err
-			}
-			lastSwipeTime = time.Now()
-
-			// check if feed page
-			if err := dExt.Driver.AssertForegroundApp(configs.AppPackageName, "feed"); err != nil {
-				return err
-			}
+			// reset failed count
+			crawler.failedCount = 0
 		}
 	}
+}
+
+type VideoType string
+
+const (
+	VideoType_Feed        VideoType = "FEED"
+	VideoType_PreviewLive VideoType = "PREVIEW-LIVE" // 直播预览流
+	VideoType_Live        VideoType = "LIVE"
+	VideoType_Image       VideoType = "IMAGE"
+)
+
+type Video struct {
+	Type     VideoType `json:"type" required:"true"` // 视频类型, feed/preview-live/live/image
+	DataType string    `json:"data_type"`            // 数据源对应的事件名称
+
+	// Feed 视频基础数据
+	CacheKey string `json:"cache_key,omitempty"` // cachekey
+	VideoID  string `json:"video_id,omitempty"`  // 视频 video ID
+	URL      string `json:"feed_url,omitempty"`  // 实际播放的视频 url
+	UserName string `json:"user_name"`           // 视频作者
+	Duration int64  `json:"duration,omitempty"`  // 视频时长(ms)
+	Caption  string `json:"caption,omitempty"`   // 视频文案
+	// 视频热度数据
+	ViewCount    int64 `json:"view_count,omitempty"`    // feed 观看数
+	LikeCount    int64 `json:"like_count,omitempty"`    // feed 点赞数
+	CommentCount int64 `json:"comment_count,omitempty"` // feed 评论数
+	CollectCount int64 `json:"collect_count,omitempty"` // feed 收藏数
+	ForwardCount int64 `json:"forward_count,omitempty"` // feed 转发数
+	ShareCount   int64 `json:"share_count,omitempty"`   // feed 分享数
+
+	// timelines
+	PublishTimestamp int64 `json:"publish_timestamp,omitempty"` // feed 发布时间戳
+	PreloadTimestamp int64 `json:"preload_timestamp,omitempty"` // feed 预加载时间戳
+
+	// Live 视频基础数据
+	LiveStreamID  string `json:"live_stream_id,omitempty"`  // 直播流 ID
+	LiveStreamURL string `json:"live_stream_url,omitempty"` // 直播流地址
+	LiveType      string `json:"live_type,omitempty"`       // 直播间类型
+	// 网络数据
+	ThroughputKbps int64 `json:"throughput_kbps,omitempty"` // 网速
+	// 视频热度数据
+	AudienceCount int64 `json:"audience_count,omitempty"` // 直播间人数
+
+	// 图文数据
+	ImageUrls []string `json:"image_urls,omitempty"` // 图片对应的 url 列表
+
+	// 记录仿真决策信息
+	PlayDuration           int64   `json:"play_duration"`            // 播放时长(ms)，取自 Simulation/Random
+	SimulationPlayProgress float64 `json:"simulation_play_progress"` // 仿真播放比例（完播率）
+	SimulationPlayDuration int64   `json:"simulation_play_duration"` // 仿真播放时长(ms)
+	RandomPlayDuration     int64   `json:"random_play_duration"`     // 随机播放时长(ms)
+}
+
+func (vc *VideoCrawler) getCurrentVideo() (video *Video, err error) {
+	if !vc.driverExt.plugin.Has("GetCurrentVideo") {
+		return nil, errors.New("plugin missing GetCurrentVideo method")
+	}
+
+	resp, err := vc.driverExt.plugin.Call("GetCurrentVideo")
+	if err != nil {
+		return nil, errors.Wrap(err, "call plugin GetCurrentVideo failed")
+	}
+
+	if resp == nil {
+		return nil, errors.New("video not found")
+	}
+
+	feedBytes, err := json.Marshal(resp)
+	if err != nil {
+		return nil, errors.New("json marshal video info failed")
+	}
+
+	video = &Video{}
+	err = json.Unmarshal(feedBytes, video)
+	if err != nil {
+		return nil, errors.Wrap(err, "json unmarshal video info failed")
+	}
+
+	if video.Type == VideoType_Live || video.Type == VideoType_PreviewLive {
+		video.RandomPlayDuration = getSimulationDuration(vc.configs.Live.SleepRandom)
+	} else {
+		video.RandomPlayDuration = getSimulationDuration(vc.configs.Feed.SleepRandom)
+	}
+
+	// get simulation play duration
+	if video.SimulationPlayDuration != 0 {
+		video.PlayDuration = video.SimulationPlayDuration
+	} else {
+		video.PlayDuration = video.RandomPlayDuration
+	}
+
+	log.Info().
+		Str("type", string(video.Type)).
+		Str("dataType", video.DataType).
+		Msg("get current video success")
+	return video, nil
 }

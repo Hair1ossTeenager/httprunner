@@ -62,14 +62,20 @@ func (ad *adbDriver) WindowSize() (size Size, err error) {
 		return size, errors.Wrap(err, "get window size failed with adb")
 	}
 
-	// output may contain both Physical and Override size
+	// output may contain both Physical and Override size, use Override if existed
 	// Physical size: 1080x2340
 	// Override size: 1080x2220
+
+	matchedSizeType := "Physical"
+	if strings.Contains(output, "Override") {
+		matchedSizeType = "Override"
+	}
+
 	var resolution string
 	sizeList := strings.Split(output, "\n")
-	log.Info().Msgf("window size: %v", sizeList)
+	log.Trace().Msgf("window size: %v", sizeList)
 	for _, size := range sizeList {
-		if strings.Contains(size, "Physical") {
+		if strings.Contains(size, matchedSizeType) {
 			resolution = strings.Split(size, ": ")[1]
 			// 1080x2340
 			ss := strings.Split(resolution, "x")
@@ -222,6 +228,8 @@ func (ad *adbDriver) TapFloat(x, y float64, options ...ActionOption) (err error)
 		x += float64(actionOptions.Offset[0])
 		y += float64(actionOptions.Offset[1])
 	}
+	x += actionOptions.getRandomOffset()
+	y += actionOptions.getRandomOffset()
 
 	// adb shell input tap x y
 	xStr := fmt.Sprintf("%.1f", x)
@@ -266,6 +274,19 @@ func (ad *adbDriver) Swipe(fromX, fromY, toX, toY int, options ...ActionOption) 
 }
 
 func (ad *adbDriver) SwipeFloat(fromX, fromY, toX, toY float64, options ...ActionOption) error {
+	actionOptions := NewActionOptions(options...)
+
+	if len(actionOptions.Offset) == 4 {
+		fromX += float64(actionOptions.Offset[0])
+		fromY += float64(actionOptions.Offset[1])
+		toX += float64(actionOptions.Offset[2])
+		toY += float64(actionOptions.Offset[3])
+	}
+	fromX += actionOptions.getRandomOffset()
+	fromY += actionOptions.getRandomOffset()
+	toX += actionOptions.getRandomOffset()
+	toY += actionOptions.getRandomOffset()
+
 	// adb shell input swipe fromX fromY toX toY
 	_, err := ad.adbClient.RunShellCommand(
 		"input", "swipe",
@@ -392,6 +413,7 @@ func (ad *adbDriver) StopCaptureLog() (result interface{}, err error) {
 		return "", err
 	}
 	content := ad.logcat.logBuffer.String()
+	log.Info().Str("logcat content", content).Msg("display logcat content")
 	return ConvertPoints(content), nil
 }
 

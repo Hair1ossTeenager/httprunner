@@ -1,8 +1,46 @@
 # Release History
 
-## v4.3.6 (2023-07-24)
+## v4.3.7 (2023-09-19)
 
+**go version**
+
+- feat: add `WithSwipeOffset` to set offset for swipe start/end point
+- feat: set random offset for tap/swipe points with `WithOffsetRandomRange`
+- change: set `WithOffset` deprecated, replace with `WithTapOffset`
+
+## v4.3.6 (2023-09-07)
+
+**go version**
+
+plugin related:
+
+- feat: add hrp executable directory for searching plugin
+- feat: init device driver with plugin options, `WithDriverCapabilities` and `WithDriverPlugin`
+- feat: support printing stderr output in myexec.RunCommand
+- change: upgrade funplugin to 0.5.3
+- refactor: move internal myexec to funplugin/myexec
+- change: create python3 plugin venv with latest funppy/httprunner
+
+UI related:
+
+- feat: get current feed info from app event trackings
+- feat: log feed screenshot take/cv elapsed time
 - feat: support to reset driver (or session only) automatically when UIA2 / WDA crashed or WebDriver request failed
+- feat: `tap_cv` action supports ui type detection and tap
+- feat: support action options for `ScreenShot`, `WithScreenShotOCR`/`WithScreenShotUpload`/`WithScreenShotLiveType`/`WithScreenShotUIType`
+- fix: add compatible support for indicating options separately at the `MobileAction` level
+- fix: use Override size if existed, otherwise use Physical size (android devices)
+- fix: add default options for `swipe_to_tap_app` action
+- refactor: ui validation methods, support parsing expect value
+- fix: reuse the same request body during `GetImage` retry
+- fix: iOS `tap_xy` scale adaption error
+- feat: support new action: `close_popups`
+- fix: swipeToTapTexts with identifiers/regex
+
+others:
+
+- change: log elapsed duration in milliseconds
+- change: set log timestamp precise to milliseconds
 
 ## v4.3.5 (2023-07-23)
 
